@@ -348,6 +348,146 @@ def calculate_centroid_expansion_box(
     raise ImageProcessingError("Safe area calculation failed")
 
 
+def estimate_mask_rotation_angle(
+    mask: np.ndarray,
+    min_angle_deg: float = 3.0,
+    max_angle_deg: float = 45.0,
+    verbose: bool = False,
+) -> float:
+    """Estimate the dominant rotation angle of a binary mask using minAreaRect.
+
+    Finds the largest contour in the mask, fits a minimum-area rotated rectangle,
+    and returns the angle of that rectangle.  Only returns a non-zero value when
+    the angle exceeds *min_angle_deg* (to avoid false positives from jagged mask
+    edges on axis-aligned bubbles) and is within *max_angle_deg* (typical SFX
+    text tilt range).
+
+    Args:
+        mask: Binary mask (0/255 uint8) of the speech bubble interior.
+        min_angle_deg: Minimum absolute angle (degrees) to report as rotated.
+            Below this threshold the function returns 0.0.
+        max_angle_deg: Maximum absolute angle (degrees) considered valid.
+            Beyond this the function returns 0.0 (likely a detection artifact).
+        verbose: Whether to log intermediate values.
+
+    Returns:
+        Rotation angle in degrees (counter-clockwise positive, matching
+        ``cv2.getRotationMatrix2D`` convention).  Returns 0.0 when the mask
+        is effectively axis-aligned or when no valid contour is found.
+    """
+    if mask is None or not np.any(mask):
+        return 0.0
+
+    binary = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
+
+    # Use the largest contour (the bubble boundary)
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 100:
+        return 0.0
+
+    rect = cv2.minAreaRect(largest)  # ((cx, cy), (w, h), angle)
+    _, (rect_w, rect_h), _ = rect
+
+    if rect_w <= 0 or rect_h <= 0:
+        return 0.0
+
+    # Determine major axis orientation via boxPoints for robust angle calculation
+    # across OpenCV versions and rotation conventions.
+    box = cv2.boxPoints(rect)
+    edge1 = box[1] - box[0]
+    edge2 = box[2] - box[1]
+    len1 = float(np.linalg.norm(edge1))
+    len2 = float(np.linalg.norm(edge2))
+
+    major_edge = edge1 if len1 >= len2 else edge2
+    dx, dy = float(major_edge[0]), float(major_edge[1])
+    ang_deg = float(np.degrees(np.arctan2(dy, dx)))
+
+    # Normalize to [-45, +45] range relative to horizontal axis
+    while ang_deg > 45.0:
+        ang_deg -= 90.0
+    while ang_deg < -45.0:
+        ang_deg += 90.0
+
+    angle = ang_deg
+    abs_angle = abs(angle)
+
+    # Suppress near-square masks where the angle is unreliable
+    aspect = min(rect_w, rect_h) / max(rect_w, rect_h)
+    if aspect > 0.92 and abs_angle < 10.0:
+        log_message(
+            f"Rotation suppressed: near-square mask (aspect={aspect:.2f}, angle={angle:.1f}°)",
+            verbose=verbose,
+        )
+        return 0.0
+
+    if abs_angle < min_angle_deg:
+        log_message(
+            f"Rotation below threshold: {angle:.1f}° < {min_angle_deg}°",
+            verbose=verbose,
+        )
+        return 0.0
+
+    if abs_angle > max_angle_deg:
+        log_message(
+            f"Rotation exceeds max: {angle:.1f}° > {max_angle_deg}°",
+            verbose=verbose,
+        )
+        return 0.0
+
+    log_message(
+        f"Estimated mask rotation: {angle:.1f}° (aspect={aspect:.2f})",
+        verbose=verbose,
+    )
+    return angle
+
+
+def unrotate_mask(
+    mask: np.ndarray, angle_deg: float
+) -> np.ndarray:
+    """Rotate a binary mask so that its tilted content becomes axis-aligned (0°).
+
+    This is used before safe-area calculation so that the Distance Transform
+    and ray-casting work on an upright version of the bubble, producing correct
+    width/height estimates for the layout engine.
+
+    Args:
+        mask: Binary mask (0/255 uint8).
+        angle_deg: The rotation angle previously estimated by
+            :func:`estimate_mask_rotation_angle` (clockwise positive).
+
+    Returns:
+        A new binary mask (0/255 uint8) of the same dimensions, rotated back
+        to 0° around its centroid.
+    """
+    if abs(angle_deg) < 1e-3:
+        return mask.copy()
+
+    h, w = mask.shape[:2]
+    # Find the centroid of the mask to rotate around its center of mass
+    moments = cv2.moments(mask)
+    if moments["m00"] > 0:
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
+    else:
+        cx, cy = w / 2.0, h / 2.0
+
+    # cv2.getRotationMatrix2D uses counter-clockwise positive convention.
+    # Passing +angle_deg rotates counter-clockwise by angle_deg, undoing the
+    # clockwise tilt angle of the speech bubble.
+    rot_mat = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
+    rotated = cv2.warpAffine(
+        mask, rot_mat, (w, h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    return (rotated > 0).astype(np.uint8) * 255
+
+
 def image_to_tensor(image: Image.Image, device: torch.device) -> torch.Tensor:
     """Converts a PIL Image to a PyTorch tensor."""
     if image.mode != "RGB":

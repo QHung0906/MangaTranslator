@@ -18,21 +18,196 @@ from . import callbacks, settings_manager, utils
 _FLUX_BACKEND_CHOICES_KLEIN = [
     ("sd.cpp", "sdcpp"),
     ("SDNQ", "sdnq"),
+    ("Cloudflare Workers AI", "cloudflare"),
+    ("Remote Colab (T4 GPU)", "remote_colab"),
+]
+_FLUX_BACKEND_CHOICES_REMOTE_ONLY = [
+    ("Cloudflare Workers AI", "cloudflare"),
+    ("Remote Colab (T4 GPU)", "remote_colab"),
 ]
 _FLUX_BACKEND_CHOICES_KONTEXT = [
     ("sd.cpp", "sdcpp"),
     ("SDNQ", "sdnq"),
     ("Nunchaku (CUDA)", "nunchaku"),
 ]
-_FLUX_BACKEND_CHOICES_DEFAULT = [("SDNQ", "sdnq")]
+_FLUX_BACKEND_CHOICES_DEFAULT = [
+    ("SDNQ", "sdnq"),
+    ("Cloudflare Workers AI", "cloudflare"),
+    ("Remote Colab (T4 GPU)", "remote_colab"),
+]
 
 
 def _flux_backend_choices(method: str):
     if method in ("flux_klein_9b", "flux_klein_4b"):
         return _FLUX_BACKEND_CHOICES_KLEIN
+    if method in ("flux_dev", "sd_inpainting"):
+        return _FLUX_BACKEND_CHOICES_REMOTE_ONLY
     if method == "flux_kontext":
         return _FLUX_BACKEND_CHOICES_KONTEXT
     return _FLUX_BACKEND_CHOICES_DEFAULT
+
+
+_INPAINTING_METHOD_CHOICES_LOCAL = [
+    ("Flux.2 Klein 9B", "flux_klein_9b"),
+    ("Flux.2 Klein 4B", "flux_klein_4b"),
+    ("Flux.1 Kontext (12B)", "flux_kontext"),
+    ("OpenCV", "opencv"),
+    ("None (text background)", "none"),
+]
+
+_INPAINTING_METHOD_CHOICES_CLOUDFLARE = [
+    ("Flux.2 Klein 4B", "flux_klein_4b"),
+    ("Flux.2 Klein 9B", "flux_klein_9b"),
+    ("Flux.2 Dev", "flux_dev"),
+    ("SD 1.5 Inpainting", "sd_inpainting"),
+    ("OpenCV", "opencv"),
+    ("None (text background)", "none"),
+]
+
+
+def _inpainting_method_choices(backend: str):
+    if backend in ("cloudflare", "remote_colab"):
+        return _INPAINTING_METHOD_CHOICES_CLOUDFLARE
+    return _INPAINTING_METHOD_CHOICES_LOCAL
+
+
+def _compute_outside_text_control_states(
+    method: str,
+    backend: str,
+    current_diffusion_quant: str = "Q4_K_M",
+    current_text_encoder_quant: str = "",
+    current_steps: int = 4,
+    upscale_small_crops: bool = True,
+    group_regions: bool = False,
+):
+    """Unified helper to compute synchronized control states for outside text / inpainting."""
+    if backend in ("cloudflare", "remote_colab"):
+        if method == "flux_kontext":
+            method = "flux_klein_4b"
+    else:
+        if method in ("flux_dev", "sd_inpainting"):
+            method = "flux_klein_4b"
+
+    valid_backend = flux_valid_backend(method, backend)
+    is_cf = valid_backend == "cloudflare"
+    is_colab = valid_backend == "remote_colab"
+    is_opencv = method == "opencv"
+    is_none = method == "none"
+    is_no_flux = is_opencv or is_none
+    is_kontext = method == "flux_kontext"
+    is_klein = method in ("flux_klein_9b", "flux_klein_4b")
+    is_dev = method == "flux_dev"
+    is_sd_inpaint = method == "sd_inpainting"
+
+    inpainting_choices = _inpainting_method_choices(valid_backend)
+    backend_choices = _flux_backend_choices(method)
+    backend_visible = not is_no_flux
+
+    show_low_vram = (not is_no_flux) and (not is_cf) and (not is_colab) and (valid_backend == "sdnq")
+    show_sdcpp = (not is_no_flux) and (not is_cf) and (not is_colab) and (valid_backend == "sdcpp")
+    show_cf_accounts = (not is_no_flux) and is_cf
+    show_colab_url = (not is_no_flux) and is_colab
+
+    available_text_encoder_quants = flux_sdcpp_text_encoder_quants(method)
+    text_encoder_quants = (
+        available_text_encoder_quants
+        or flux_sdcpp_text_encoder_quants("flux_klein_4b")
+    )
+    diffusion_quant_value = (
+        current_diffusion_quant
+        if current_diffusion_quant in FLUX_SDCPP_DIFFUSION_QUANTS
+        else "Q4_K_M"
+    )
+    text_encoder_quant_value = flux_sdcpp_valid_text_encoder_quant(
+        method, current_text_encoder_quant
+    )
+
+    residual_interactive = is_kontext and valid_backend == "nunchaku"
+
+    if is_no_flux:
+        steps_update = gr.update(interactive=False)
+        seed_update = gr.update(interactive=False)
+        group_regions_update = gr.update(visible=False, interactive=False, value=False)
+        upscale_update = gr.update(visible=False, interactive=False)
+        lum_update = gr.update(visible=False, interactive=False, value=False)
+    elif is_cf:
+        if is_klein:
+            steps_update = gr.update(interactive=False, value=4, maximum=12)
+            seed_update = gr.update(interactive=False)
+        elif is_dev:
+            steps_update = gr.update(
+                interactive=True,
+                value=28 if current_steps > 28 or current_steps < 1 else current_steps,
+                maximum=28,
+            )
+            seed_update = gr.update(interactive=False)
+        elif is_sd_inpaint:
+            steps_update = gr.update(
+                interactive=True,
+                value=20 if current_steps > 50 or current_steps < 1 else current_steps,
+                maximum=50,
+            )
+            seed_update = gr.update(interactive=True)
+        else:
+            steps_update = gr.update(interactive=True)
+            seed_update = gr.update(interactive=True)
+
+        group_regions_update = gr.update(visible=True, interactive=False, value=False)
+        upscale_update = gr.update(visible=True, interactive=is_klein)
+        lum_interactive = is_klein and bool(upscale_small_crops)
+        lum_update = gr.update(
+            visible=is_klein,
+            interactive=lum_interactive,
+            value=lum_interactive,
+        )
+    else:
+        if is_klein:
+            steps_update = gr.update(
+                interactive=True,
+                maximum=12,
+                value=4 if current_steps > 12 else current_steps,
+            )
+        elif is_kontext:
+            steps_update = gr.update(
+                interactive=True,
+                maximum=30,
+                value=8 if current_steps > 30 else current_steps,
+            )
+        else:
+            steps_update = gr.update(interactive=True, maximum=12)
+
+        seed_update = gr.update(interactive=True)
+        group_regions_update = gr.update(visible=True, interactive=True)
+        upscale_update = gr.update(visible=True, interactive=is_klein)
+        lum_interactive = is_klein and bool(upscale_small_crops) and not bool(group_regions)
+        lum_update = gr.update(
+            visible=is_klein,
+            interactive=lum_interactive,
+            value=lum_interactive,
+        )
+
+    return {
+        "method": method,
+        "backend": valid_backend,
+        "inpainting_choices": inpainting_choices,
+        "backend_choices": backend_choices,
+        "backend_visible": backend_visible,
+        "show_low_vram": show_low_vram,
+        "show_sdcpp": show_sdcpp,
+        "show_cf_accounts": show_cf_accounts,
+        "show_colab_url": show_colab_url,
+        "diffusion_quant_value": diffusion_quant_value,
+        "text_encoder_quants": text_encoder_quants,
+        "text_encoder_quant_value": text_encoder_quant_value,
+        "available_text_encoder_quants": available_text_encoder_quants,
+        "residual_interactive": residual_interactive,
+        "steps_update": steps_update,
+        "seed_update": seed_update,
+        "group_regions_update": group_regions_update,
+        "upscale_update": upscale_update,
+        "lum_update": lum_update,
+        "inpaint_colored_bubbles_interactive": not is_no_flux,
+    }
 
 
 _ALPHABETICAL_LANGUAGES = [
@@ -125,27 +300,43 @@ PADDLE_OCR_VL_LANGUAGES = [
 js_credits = """
 function() {
     const footer = document.querySelector('footer');
-    if (footer) {
-        // Check if credits already exist
-        if (footer.parentNode.querySelector('.mangatl-credits')) {
-            return;
-        }
+    if (footer && !footer.parentNode.querySelector('.mangatl-credits')) {
         const newContent = document.createElement('div');
-        newContent.className = 'mangatl-credits'; // Add a class for identification
-        newContent.innerHTML = 'made by <a href="https://github.com/meangrinch">grinnch</a> with ❤️'; // credits
-
+        newContent.className = 'mangatl-credits';
+        newContent.innerHTML = 'made by <a href="https://github.com/meangrinch">grinnch</a> with ❤️';
         newContent.style.textAlign = 'center';
         newContent.style.paddingTop = '50px';
         newContent.style.color = 'lightgray';
-
-        // Style the hyperlink
         const link = newContent.querySelector('a');
         if (link) {
             link.style.color = 'gray';
             link.style.textDecoration = 'underline';
         }
-
         footer.parentNode.insertBefore(newContent, footer);
+    }
+
+    if (!window._batchShortcutAttached) {
+        window._batchShortcutAttached = true;
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                const target = e.target;
+                const isChatInput = target && target.closest && (target.closest('#batch_chat_input') || target.id === 'batch_chat_input');
+                if (isChatInput) {
+                    return;
+                }
+
+                const isTextarea = target && target.tagName === 'TEXTAREA';
+                const isInput = target && target.tagName === 'INPUT';
+
+                if (e.ctrlKey || (!isTextarea && !isInput)) {
+                    const btn = document.querySelector('#batch_process_button button') || document.querySelector('#batch_process_button');
+                    if (btn && !btn.disabled) {
+                        e.preventDefault();
+                        btn.click();
+                    }
+                }
+            }
+        });
     }
 }
 """
@@ -225,6 +416,7 @@ js_reset_status_height = """
     }, 100);
 }
 """
+
 
 
 def create_layout(
@@ -356,6 +548,14 @@ def create_layout(
                             interactive=False,
                             elem_id="translator_status_message",
                         )
+                        manual_txt_editor = gr.Textbox(
+                            label="✏️ Hộp dịch thủ công (TXT) / Manual Translation Box",
+                            interactive=True,
+                            lines=15,
+                            visible=saved_settings.get("manual_json_translation", False),
+                            placeholder="Nội dung file dịch sẽ hiển thị ở đây sau khi bạn nhấn Translate lần đầu ở chế độ dịch thủ công...",
+                            elem_id="manual_txt_editor",
+                        )
                         with gr.Row():
                             translate_button = gr.Button("Translate", variant="primary")
                             clear_button = gr.Button("Clear")
@@ -377,14 +577,9 @@ def create_layout(
                             file_count="single",
                             file_types=[".zip", ".txt"],
                             type="filepath",
+                            visible=False,
                         )
-                        batch_font_dropdown = gr.Dropdown(
-                            choices=font_choices,
-                            label="Text Font",
-                            value=batch_default_font,
-                            filterable=False,
-                        )
-                        with gr.Accordion("Translation Settings", open=True):
+                        with gr.Accordion("Translation Settings", open=True, visible=False):
                             # Hidden state to store original language selection before manga-ocr forces Japanese
                             batch_original_language_state = gr.State(
                                 value=saved_settings.get(
@@ -398,6 +593,7 @@ def create_layout(
                                     "batch_input_language", "Japanese"
                                 ),
                                 allow_custom_value=True,
+                                visible=False,
                             )
                             batch_output_language = gr.Dropdown(
                                 TARGET_LANGUAGES,
@@ -406,7 +602,59 @@ def create_layout(
                                     "batch_output_language", "English"
                                 ),
                                 allow_custom_value=True,
+                                visible=False,
                             )
+                        with gr.Accordion(
+                            "🤖 Trợ lý AI Dịch Batch (Interactive Gemini Session)",
+                            open=True,
+                            elem_id="batch_ai_assistant_accordion",
+                            visible=saved_settings.get("manual_json_translation", False),
+                        ) as batch_ai_assistant_accordion:
+                            with gr.Row():
+                                batch_chat_model_selector = gr.Dropdown(
+                                    label="Chọn Model Gemini",
+                                    choices=[
+                                        "gemini-3.8-flash",
+                                        "gemini-3.7-flash",
+                                        "gemini-3.6-flash",
+                                        "gemini-3.5-flash",
+                                        "gemini-3.5-flash-lite",
+                                        "gemini-3.1-flash-lite",
+                                        "gemini-3-flash",
+                                        "gemini-2.5-flash",
+                                        "gemini-2.5-flash-lite",
+                                        "gemini-2.5-pro",
+                                    ],
+                                    value="gemini-3.8-flash",
+                                    scale=2,
+                                    interactive=True,
+                                )
+                                with gr.Column(scale=3):
+                                    batch_chat_status = gr.Markdown(
+                                        "**Model đã chọn:** `gemini-3.8-flash`"
+                                    )
+                            batch_chat_history = gr.Chatbot(
+                                label="Hội thoại với Gemini (Gems Persona 18+)",
+                                height=380,
+                                elem_id="batch_chat_history",
+                            )
+                            with gr.Row():
+                                batch_chat_input = gr.Textbox(
+                                    label="Tin nhắn / Yêu cầu",
+                                    placeholder="VD: 'Dịch 10 trang đầu', 'Sửa nhân vật A xưng anh với B'...",
+                                    scale=4,
+                                    lines=1,
+                                    elem_id="batch_chat_input",
+                                )
+                                batch_chat_send_btn = gr.Button("Gửi", variant="primary", scale=1)
+                                batch_chat_cancel_btn = gr.Button("⏹️ Hủy yêu cầu", variant="stop", scale=1)
+                            with gr.Row():
+                                batch_chat_auto_all_btn = gr.Button("🚀 Tự động dịch toàn bộ (10 trang/lần)", variant="primary")
+                                batch_chat_quick_check_role_btn = gr.Button("👥 Kiểm tra xưng hô", variant="secondary")
+                            with gr.Row():
+                                batch_chat_init_btn = gr.Button("📤 Nạp OCR từ Hộp Dịch vào AI", variant="secondary")
+                                batch_chat_apply_btn = gr.Button("📥 Điền kết quả từ AI vào Hộp Dịch", variant="primary")
+                                batch_chat_reset_btn = gr.Button("🔄 Đặt lại Session", variant="secondary")
                         batch_special_instructions = gr.Textbox(
                             label="Special Instructions",
                             placeholder="Give the LLM optional context, formatting instructions, etc.",
@@ -511,9 +759,17 @@ def create_layout(
                             interactive=False,
                             elem_id="batch_status_message",
                         )
+                        batch_manual_txt_editor = gr.Textbox(
+                            label="✏️ Hộp dịch thủ công Batch (TXT) / Batch Manual Translation Box",
+                            interactive=True,
+                            lines=20,
+                            visible=saved_settings.get("manual_json_translation", False),
+                            placeholder="Nội dung bản dịch mẫu của cả batch sẽ hiển thị ở đây sau khi bạn nhấn Start Batch Translating...",
+                            elem_id="batch_manual_txt_editor",
+                        )
                         with gr.Row():
                             batch_process_button = gr.Button(
-                                "Start Batch Translating", variant="primary"
+                                "Start Batch Translating", variant="primary", elem_id="batch_process_button"
                             )
                             batch_clear_button = gr.Button("Clear")
                             batch_cancel_button = gr.Button(
@@ -776,6 +1032,16 @@ def create_layout(
                                 visible=(config_initial_provider == "Google"),
                                 elem_id="google_api_key",
                                 info="Stored locally. Or set via GOOGLE_API_KEY / GEMINI_API_KEY env var.",
+                            )
+                            manual_json_translation = gr.Checkbox(
+                                label="✏️ Manual Edit (TXT) / Dịch thủ công",
+                                value=saved_settings.get("manual_json_translation", False),
+                                visible=(config_initial_provider == "Google"),
+                                elem_id="manual_json_translation",
+                                info=(
+                                    "Lần đầu: Tạo file JSON chứa bản dịch AI tham khảo để bạn chỉnh sửa. "
+                                    "Lần sau: Đọc bản dịch thủ công từ file JSON đó để vẽ lên ảnh (không gọi API)."
+                                ),
                             )
                             openai_api_key = gr.Textbox(
                                 label="OpenAI API Key",
@@ -1441,6 +1707,25 @@ def create_layout(
                                 info="Multiplier for font size when text is stacked vertically.",
                                 visible=saved_settings.get("auto_vertical_text", False),
                             )
+                            auto_rotate_text = gr.Checkbox(
+                                value=saved_settings.get("auto_rotate_text", True),
+                                label="Auto-Rotate Text to Match Bubble/Text Angle",
+                                info=(
+                                    "Automatically rotate translated text to match the tilt angle "
+                                    "of original text and speech bubbles."
+                                ),
+                            )
+                            auto_rotate_confidence_threshold = gr.Slider(
+                                0.1,
+                                1.0,
+                                value=saved_settings.get(
+                                    "auto_rotate_confidence_threshold", 0.5
+                                ),
+                                step=0.05,
+                                label="Tilt Confidence Threshold",
+                                info="Minimum confidence required to rotate text. Below this threshold, text remains horizontal (0 deg).",
+                                visible=saved_settings.get("auto_rotate_text", True),
+                            )
                             _saved_hyphenate = saved_settings.get(
                                 "hyphenate_before_scaling", True
                             )
@@ -1671,39 +1956,42 @@ def create_layout(
                                     ),
                                 )
                                 gr.Markdown("### Inpainting")
-                                outside_text_inpainting_method = gr.Radio(
-                                    value=saved_settings.get(
-                                        "outside_text_inpainting_method",
-                                        "flux_klein_4b",
+                                _initial_backend = flux_valid_backend(
+                                    saved_settings.get(
+                                        "outside_text_inpainting_method", "flux_klein_4b"
                                     ),
-                                    choices=[
-                                        ("Flux.2 Klein 9B", "flux_klein_9b"),
-                                        ("Flux.2 Klein 4B", "flux_klein_4b"),
-                                        ("Flux.1 Kontext (12B)", "flux_kontext"),
-                                        ("OpenCV", "opencv"),
-                                        ("None (text background)", "none"),
-                                    ],
-                                    label="Inpainting Method",
-                                    info=(
-                                        "Klein models are newer, but may introduce minor color "
-                                        "shifts. Kontext does not shift colors, but is more dated."
+                                    saved_settings.get(
+                                        "outside_text_flux_backend", "sdnq"
                                     ),
                                 )
                                 _initial_method = saved_settings.get(
                                     "outside_text_inpainting_method", "flux_klein_4b"
                                 )
+                                if _initial_backend != "cloudflare" and _initial_method in (
+                                    "flux_dev",
+                                    "sd_inpainting",
+                                ):
+                                    _initial_method = "flux_klein_4b"
+                                elif _initial_backend == "cloudflare" and _initial_method == "flux_kontext":
+                                    _initial_method = "flux_klein_4b"
+
+                                outside_text_inpainting_method = gr.Radio(
+                                    value=_initial_method,
+                                    choices=_inpainting_method_choices(_initial_backend),
+                                    label="Inpainting Method",
+                                    info=(
+                                        "Klein/Dev/SD models run via local or Cloudflare. "
+                                        "Kontext does not shift colors, but is more dated."
+                                    ),
+                                )
                                 _is_kontext = _initial_method == "flux_kontext"
                                 _is_klein_model = _initial_method in (
                                     "flux_klein_9b",
                                     "flux_klein_4b",
+                                    "flux_dev",
+                                    "sd_inpainting",
                                 )
                                 _backend_visible = _is_klein_model or _is_kontext
-                                _initial_backend = flux_valid_backend(
-                                    _initial_method,
-                                    saved_settings.get(
-                                        "outside_text_flux_backend", "sdnq"
-                                    ),
-                                )
                                 outside_text_flux_backend_state = gr.State(
                                     _initial_backend
                                 )
@@ -1712,11 +2000,42 @@ def create_layout(
                                     value=_initial_backend,
                                     label="Flux Backend",
                                     info=(
-                                        "SDNQ/sd.cpp: cross-platform, no HF token. "
-                                        "Nunchaku: CUDA-only, HF token required."
+                                        "SDNQ/sd.cpp: cross-platform, local. "
+                                        "Cloudflare: Serverless 10k Neurons/ngày free. "
+                                        "Nunchaku: CUDA-only."
                                     ),
                                     visible=_backend_visible,
                                 )
+                                outside_text_cloudflare_accounts = gr.Textbox(
+                                    label="Cloudflare Accounts (Xoay API)",
+                                    value=saved_settings.get(
+                                        "outside_text_cloudflare_accounts", ""
+                                    ),
+                                    lines=3,
+                                    placeholder="ACCOUNT_ID:API_TOKEN\nACCOUNT_ID_2:API_TOKEN_2",
+                                    info="Nhập mỗi dòng một tài khoản theo định dạng ACCOUNT_ID:API_TOKEN để tự động xoay khi hết hạn mức 10.000 Neurons/ngày.",
+                                    visible=_backend_visible and _initial_backend == "cloudflare",
+                                )
+                                with gr.Group(
+                                    visible=_backend_visible and _initial_backend == "remote_colab"
+                                ) as outside_text_colab_group:
+                                    outside_text_colab_server_url = gr.Textbox(
+                                        label="Colab Server URL (Cloudflare Tunnel)",
+                                        value=saved_settings.get(
+                                            "outside_text_colab_server_url", ""
+                                        ),
+                                        lines=1,
+                                        placeholder="https://xxxx.trycloudflare.com",
+                                        info="Dán link HTTPS do Cloudflare Tunnel sinh ra trên Google Colab.",
+                                    )
+                                    test_colab_connection_btn = gr.Button(
+                                        "⚡ Kiểm tra kết nối Colab",
+                                        size="sm",
+                                        variant="secondary",
+                                    )
+                                    colab_connection_status = gr.Markdown(
+                                        value="",
+                                    )
                                 outside_text_flux_residual_diff_threshold = gr.Slider(
                                     0.0,
                                     1.0,
@@ -1836,19 +2155,30 @@ def create_layout(
                                 outside_text_flux_sdcpp_text_encoder_quant_state = (
                                     gr.State(_initial_text_encoder_quant)
                                 )
+                                _is_cf = _initial_backend == "cloudflare"
+                                _cf_is_klein = _is_cf and _initial_method in ("flux_klein_9b", "flux_klein_4b")
+                                _cf_no_seed = _is_cf and _initial_method in ("flux_klein_9b", "flux_klein_4b", "flux_dev")
                                 outside_text_flux_num_inference_steps = gr.Slider(
                                     1,
                                     (
-                                        30
-                                        if saved_settings.get(
-                                            "outside_text_inpainting_method",
-                                            "flux_klein_4b",
+                                        50
+                                        if _initial_method == "sd_inpainting"
+                                        else (
+                                            28
+                                            if _initial_method == "flux_dev"
+                                            else (
+                                                30
+                                                if _initial_method == "flux_kontext"
+                                                else 12
+                                            )
                                         )
-                                        == "flux_kontext"
-                                        else 12
                                     ),
-                                    value=saved_settings.get(
-                                        "outside_text_flux_num_inference_steps", 4
+                                    value=(
+                                        4
+                                        if _cf_is_klein
+                                        else saved_settings.get(
+                                            "outside_text_flux_num_inference_steps", 4
+                                        )
                                     ),
                                     step=1,
                                     label="Steps",
@@ -1856,25 +2186,28 @@ def create_layout(
                                         "Klein: 4 is recommended. "
                                         "Kontext: 6-15 is recommended."
                                     ),
-                                    interactive=saved_settings.get(
-                                        "outside_text_inpainting_method",
-                                        "flux_klein_4b",
-                                    )
-                                    != "opencv",
+                                    interactive=(
+                                        _initial_method not in ("opencv", "none")
+                                        and not _cf_is_klein
+                                    ),
                                 )
-                                _is_klein_for_lum = saved_settings.get(
-                                    "outside_text_inpainting_method",
+                                _is_klein_for_lum = _initial_method in (
+                                    "flux_klein_9b",
                                     "flux_klein_4b",
-                                ) in ("flux_klein_9b", "flux_klein_4b")
-                                _is_flux_for_klein_options = saved_settings.get(
-                                    "outside_text_inpainting_method",
-                                    "flux_klein_4b",
-                                ) not in ("opencv", "none")
+                                )
+                                _is_flux_for_klein_options = _initial_method not in (
+                                    "opencv",
+                                    "none",
+                                )
                                 _upscale_small_crops_enabled = saved_settings.get(
                                     "outside_text_flux_upscale_small_crops", True
                                 )
-                                _group_flux_regions_enabled = saved_settings.get(
-                                    "outside_text_flux_group_regions", False
+                                _group_flux_regions_enabled = (
+                                    False
+                                    if _is_cf
+                                    else saved_settings.get(
+                                        "outside_text_flux_group_regions", False
+                                    )
                                 )
                                 outside_text_flux_luminance_correction = gr.Checkbox(
                                     value=(
@@ -1919,30 +2252,26 @@ def create_layout(
                                     interactive=_is_klein_for_lum,
                                 )
                                 outside_text_flux_group_regions = gr.Checkbox(
-                                    value=saved_settings.get(
-                                        "outside_text_flux_group_regions", False
-                                    ),
+                                    value=_group_flux_regions_enabled,
                                     label="Group Flux Regions",
                                     info=(
                                         "Run one Flux pass over a combined expanded mask for all non-solid OSB regions."
                                     ),
                                     visible=_is_flux_for_klein_options,
-                                    interactive=saved_settings.get(
-                                        "outside_text_inpainting_method",
-                                        "flux_klein_4b",
-                                    )
-                                    not in ("opencv", "none"),
+                                    interactive=(
+                                        _initial_method not in ("opencv", "none")
+                                        and not _is_cf
+                                    ),
                                 )
                                 outside_text_seed = gr.Number(
                                     value=saved_settings.get("outside_text_seed", 1),
                                     label="Seed",
                                     info="Seed for reproducible inpainting (-1 = random)",
                                     precision=0,
-                                    interactive=saved_settings.get(
-                                        "outside_text_inpainting_method",
-                                        "flux_klein_4b",
-                                    )
-                                    not in ("opencv", "none"),
+                                    interactive=(
+                                        _initial_method not in ("opencv", "none")
+                                        and not _cf_no_seed
+                                    ),
                                 )
                                 inpaint_colored_bubbles = gr.Checkbox(
                                     value=saved_settings.get(
@@ -2021,8 +2350,15 @@ def create_layout(
                                 outside_text_osb_font_pack = gr.Dropdown(
                                     value=saved_osb_font_pack,
                                     choices=[""] + font_choices,
-                                    label="Text Font",
-                                    info="Font for rendering OSB text translations (leave empty to use main font)",
+                                    label="Text Font (Ngoài khung / OSB)",
+                                    info="Font để vẽ chữ ngoài khung thoại / SFX (để trống sẽ dùng theo Text Font)",
+                                )
+                                batch_font_dropdown = gr.Dropdown(
+                                    choices=font_choices,
+                                    label="Text Font (Khung thoại / Bubble)",
+                                    value=batch_default_font,
+                                    filterable=False,
+                                    info="Font mặc định cho văn bản dịch trong khung thoại (Bubble)",
                                 )
                                 outside_text_osb_max_font_size = gr.Slider(
                                     5,
@@ -2370,6 +2706,8 @@ def create_layout(
             auto_vertical_text,
             vertical_line_spacing_mult,
             vertical_font_size_mult,
+            auto_rotate_text,
+            auto_rotate_confidence_threshold,
             special_instructions,
             batch_special_instructions,
             hyphen_penalty,
@@ -2381,6 +2719,8 @@ def create_layout(
             outside_text_seed,
             outside_text_inpainting_method,
             outside_text_flux_backend_state,
+            outside_text_cloudflare_accounts,
+            outside_text_colab_server_url,
             outside_text_flux_low_vram,
             outside_text_flux_sdcpp_cache_mode,
             outside_text_flux_sdcpp_diffusion_quant_state,
@@ -2427,6 +2767,7 @@ def create_layout(
             batch_retry_failed_once,
             batch_previous_context_image_count,
             batch_previous_context_text_count,
+            manual_json_translation,
         ]
 
         reset_outputs = [
@@ -2507,6 +2848,8 @@ def create_layout(
             auto_vertical_text,
             vertical_line_spacing_mult,
             vertical_font_size_mult,
+            auto_rotate_text,
+            auto_rotate_confidence_threshold,
             hyphen_penalty,
             hyphenation_min_word_length,
             special_instructions,
@@ -2516,6 +2859,8 @@ def create_layout(
             outside_text_inpainting_method,
             outside_text_flux_backend,
             outside_text_flux_backend_state,
+            outside_text_cloudflare_accounts,
+            outside_text_colab_server_url,
             outside_text_flux_low_vram,
             outside_text_flux_sdcpp_cache_mode,
             outside_text_flux_sdcpp_diffusion_quant,
@@ -2641,6 +2986,8 @@ def create_layout(
             auto_vertical_text,
             vertical_line_spacing_mult,
             vertical_font_size_mult,
+            auto_rotate_text,
+            auto_rotate_confidence_threshold,
             hyphen_penalty,
             hyphenation_min_word_length,
             badness_exponent,
@@ -2650,6 +2997,8 @@ def create_layout(
             outside_text_seed,
             outside_text_inpainting_method,
             outside_text_flux_backend_state,
+            outside_text_cloudflare_accounts,
+            outside_text_colab_server_url,
             outside_text_flux_low_vram,
             outside_text_flux_sdcpp_cache_mode,
             outside_text_flux_sdcpp_diffusion_quant_state,
@@ -2701,6 +3050,8 @@ def create_layout(
             batch_retry_failed_once,
             batch_previous_context_image_count,
             batch_previous_context_text_count,
+            manual_json_translation,
+            manual_txt_editor,
         ]
 
         batch_inputs = [
@@ -2779,6 +3130,8 @@ def create_layout(
             auto_vertical_text,
             vertical_line_spacing_mult,
             vertical_font_size_mult,
+            auto_rotate_text,
+            auto_rotate_confidence_threshold,
             hyphen_penalty,
             hyphenation_min_word_length,
             badness_exponent,
@@ -2788,6 +3141,8 @@ def create_layout(
             outside_text_seed,
             outside_text_inpainting_method,
             outside_text_flux_backend_state,
+            outside_text_cloudflare_accounts,
+            outside_text_colab_server_url,
             outside_text_flux_low_vram,
             outside_text_flux_sdcpp_cache_mode,
             outside_text_flux_sdcpp_diffusion_quant_state,
@@ -2839,6 +3194,8 @@ def create_layout(
             batch_retry_failed_once,
             batch_previous_context_image_count,
             batch_previous_context_text_count,
+            manual_json_translation,
+            batch_manual_txt_editor,
         ]
 
         # Config Tab Navigation & Updates
@@ -2949,6 +3306,7 @@ def create_layout(
                 reasoning_effort_dropdown,
                 effort_dropdown,
                 verbosity_dropdown,
+                manual_json_translation,
             ],
             queue=False,
         ).then(  # Trigger model fetch *after* provider change updates visibility etc.
@@ -3163,6 +3521,13 @@ def create_layout(
             queue=False,
         )
 
+        auto_rotate_text.change(
+            fn=lambda x: gr.update(visible=x),
+            inputs=auto_rotate_text,
+            outputs=auto_rotate_confidence_threshold,
+            queue=False,
+        )
+
         outside_text_osb_auto_vertical_text.change(
             fn=lambda x: (gr.update(visible=x), gr.update(visible=x)),
             inputs=outside_text_osb_auto_vertical_text,
@@ -3188,6 +3553,8 @@ def create_layout(
         )
 
         # Inpainting method change -> enable/disable controls and adjust steps range
+
+        # Inpainting method change -> enable/disable controls and adjust steps range
         def _update_inpainting_controls(
             method: str,
             current_backend: str,
@@ -3198,91 +3565,52 @@ def create_layout(
             group_regions: bool,
         ):
             """Update controls based on inpainting method selection."""
-            is_opencv = method == "opencv"
-            is_none = method == "none"
-            is_no_flux = is_opencv or is_none
-            is_kontext = method == "flux_kontext"
-            is_klein = method in ("flux_klein_9b", "flux_klein_4b")
-
-            if is_kontext:
-                max_steps = 30
-                default_steps = 8
-            else:
-                max_steps = 12
-                default_steps = 4
-
-            if is_klein:
-                backend_value = flux_valid_backend(method, current_backend)
-                backend_visible = True
-            elif is_kontext:
-                backend_value = flux_valid_backend(method, current_backend)
-                backend_visible = True
-            else:
-                backend_value = flux_valid_backend(method, current_backend)
-                backend_visible = False
-
-            show_low_vram = (is_klein or is_kontext) and backend_value == "sdnq"
-            show_sdcpp_cache = (is_klein or is_kontext) and backend_value == "sdcpp"
-            available_text_encoder_quants = flux_sdcpp_text_encoder_quants(method)
-            text_encoder_quants = (
-                available_text_encoder_quants
-                or flux_sdcpp_text_encoder_quants("flux_klein_4b")
+            st = _compute_outside_text_control_states(
+                method=method,
+                backend=current_backend,
+                current_diffusion_quant=current_diffusion_quant,
+                current_text_encoder_quant=current_text_encoder_quant,
+                current_steps=current_steps,
+                upscale_small_crops=upscale_small_crops,
+                group_regions=group_regions,
             )
-            diffusion_quant_value = (
-                current_diffusion_quant
-                if current_diffusion_quant in FLUX_SDCPP_DIFFUSION_QUANTS
-                else "Q4_K_M"
-            )
-            text_encoder_quant_value = flux_sdcpp_valid_text_encoder_quant(
-                method, current_text_encoder_quant
-            )
-            residual_interactive = is_kontext and backend_value == "nunchaku"
-            luminance_interactive = (
-                is_klein and bool(upscale_small_crops) and not bool(group_regions)
-            )
-            luminance_update = gr.update(visible=False, interactive=False)
-            if is_klein:
-                luminance_update = gr.update(
-                    visible=True,
-                    interactive=luminance_interactive,
-                    value=luminance_interactive,
-                )
-
             return (
                 gr.update(
-                    visible=backend_visible,
-                    choices=_flux_backend_choices(method),
-                    value=backend_value,
+                    visible=st["backend_visible"],
+                    choices=st["backend_choices"],
+                    value=st["backend"],
                 ),
-                backend_value,
-                gr.update(visible=show_low_vram),
-                gr.update(visible=show_sdcpp_cache),
+                st["backend"],
+                gr.update(
+                    choices=st["inpainting_choices"],
+                    value=st["method"],
+                ),
+                gr.update(visible=st["show_low_vram"]),
+                gr.update(visible=st["show_sdcpp"]),
                 gr.update(
                     choices=[(quant, quant) for quant in FLUX_SDCPP_DIFFUSION_QUANTS],
-                    value=diffusion_quant_value,
-                    visible=show_sdcpp_cache,
+                    value=st["diffusion_quant_value"],
+                    visible=st["show_sdcpp"],
                 ),
-                diffusion_quant_value,
+                st["diffusion_quant_value"],
                 gr.update(
-                    choices=[(quant, quant) for quant in text_encoder_quants],
-                    value=text_encoder_quant_value,
-                    visible=show_sdcpp_cache and bool(available_text_encoder_quants),
+                    choices=[(quant, quant) for quant in st["text_encoder_quants"]],
+                    value=st["text_encoder_quant_value"],
+                    visible=st["show_sdcpp"] and bool(st["available_text_encoder_quants"]),
                 ),
-                text_encoder_quant_value,
+                st["text_encoder_quant_value"],
+                st["steps_update"],
+                st["lum_update"],
+                st["upscale_update"],
+                st["group_regions_update"],
                 gr.update(
-                    interactive=(not is_no_flux),
-                    maximum=max_steps,
-                    value=default_steps,
+                    visible=st["residual_interactive"],
+                    interactive=st["residual_interactive"],
                 ),
-                luminance_update,
-                gr.update(visible=(not is_no_flux), interactive=is_klein),
-                gr.update(visible=(not is_no_flux), interactive=(not is_no_flux)),
-                gr.update(
-                    visible=residual_interactive,
-                    interactive=residual_interactive,
-                ),
-                gr.update(interactive=(not is_no_flux)),
-                gr.update(interactive=(not is_no_flux)),
+                st["seed_update"],
+                gr.update(interactive=st["inpaint_colored_bubbles_interactive"]),
+                gr.update(visible=st["show_cf_accounts"]),
+                gr.update(visible=st["show_colab_url"]),
             )
 
         outside_text_inpainting_method.change(
@@ -3299,6 +3627,7 @@ def create_layout(
             outputs=[
                 outside_text_flux_backend,
                 outside_text_flux_backend_state,
+                outside_text_inpainting_method,
                 outside_text_flux_low_vram,
                 outside_text_flux_sdcpp_cache_mode,
                 outside_text_flux_sdcpp_diffusion_quant,
@@ -3312,22 +3641,24 @@ def create_layout(
                 outside_text_flux_residual_diff_threshold,
                 outside_text_seed,
                 inpaint_colored_bubbles,
+                outside_text_cloudflare_accounts,
+                outside_text_colab_group,
             ],
             queue=False,
         )
 
         def _update_luminance_interactivity(
-            upscale_small_crops: bool, group_regions: bool, method: str
+            upscale_small_crops: bool, group_regions: bool, method: str, backend: str
         ):
             """Luminance correction is calibrated for ungrouped ~1MP Klein crops."""
             is_klein = method in ("flux_klein_9b", "flux_klein_4b")
             if not is_klein:
-                return gr.update(interactive=False)
+                return gr.update(interactive=False, visible=False, value=False)
 
-            luminance_interactive = bool(upscale_small_crops) and not bool(
-                group_regions
-            )
+            effective_group = False if backend == "cloudflare" else bool(group_regions)
+            luminance_interactive = bool(upscale_small_crops) and not effective_group
             return gr.update(
+                visible=True,
                 interactive=luminance_interactive,
                 value=luminance_interactive,
             )
@@ -3342,45 +3673,69 @@ def create_layout(
                     outside_text_flux_upscale_small_crops,
                     outside_text_flux_group_regions,
                     outside_text_inpainting_method,
+                    outside_text_flux_backend,
                 ],
                 outputs=outside_text_flux_luminance_correction,
                 queue=False,
             )
 
-        # Flux backend change -> update sd.cpp-specific, Low VRAM, and Residual diff visibility
+        # Flux backend change -> update sd.cpp-specific, Low VRAM, Residual diff, and method visibility
         def _update_flux_backend_controls(
-            backend: str, method: str, current_text_encoder_quant: str
+            backend: str,
+            method: str,
+            current_diffusion_quant: str,
+            current_text_encoder_quant: str,
+            current_steps: int,
+            upscale_small_crops: bool,
+            group_regions: bool,
         ):
             """Update controls when Flux backend changes."""
-            is_kontext = method == "flux_kontext"
-            is_klein = method in ("flux_klein_9b", "flux_klein_4b")
-            backend_value = flux_valid_backend(method, backend)
-            show_low_vram = (is_klein or is_kontext) and backend_value == "sdnq"
-            show_sdcpp_cache = (is_klein or is_kontext) and backend_value == "sdcpp"
-            text_encoder_quants = flux_sdcpp_text_encoder_quants(method)
-            text_encoder_quant_value = flux_sdcpp_valid_text_encoder_quant(
-                method, current_text_encoder_quant
+            st = _compute_outside_text_control_states(
+                method=method,
+                backend=backend,
+                current_diffusion_quant=current_diffusion_quant,
+                current_text_encoder_quant=current_text_encoder_quant,
+                current_steps=current_steps,
+                upscale_small_crops=upscale_small_crops,
+                group_regions=group_regions,
             )
             return (
                 gr.update(
-                    choices=_flux_backend_choices(method),
-                    value=backend_value,
-                    visible=is_klein or is_kontext,
+                    visible=st["backend_visible"],
+                    choices=st["backend_choices"],
+                    value=st["backend"],
                 ),
-                backend_value,
-                gr.update(visible=show_low_vram),
-                gr.update(visible=show_sdcpp_cache),
-                gr.update(visible=show_sdcpp_cache),
+                st["backend"],
                 gr.update(
-                    choices=[(quant, quant) for quant in text_encoder_quants],
-                    value=text_encoder_quant_value,
-                    visible=show_sdcpp_cache and bool(text_encoder_quants),
+                    choices=st["inpainting_choices"],
+                    value=st["method"],
                 ),
-                text_encoder_quant_value,
+                gr.update(visible=st["show_low_vram"]),
+                gr.update(visible=st["show_sdcpp"]),
                 gr.update(
-                    visible=(is_kontext and backend_value == "nunchaku"),
-                    interactive=(is_kontext and backend_value == "nunchaku"),
+                    choices=[(quant, quant) for quant in FLUX_SDCPP_DIFFUSION_QUANTS],
+                    value=st["diffusion_quant_value"],
+                    visible=st["show_sdcpp"],
                 ),
+                st["diffusion_quant_value"],
+                gr.update(
+                    choices=[(quant, quant) for quant in st["text_encoder_quants"]],
+                    value=st["text_encoder_quant_value"],
+                    visible=st["show_sdcpp"] and bool(st["available_text_encoder_quants"]),
+                ),
+                st["text_encoder_quant_value"],
+                st["steps_update"],
+                st["lum_update"],
+                st["upscale_update"],
+                st["group_regions_update"],
+                gr.update(
+                    visible=st["residual_interactive"],
+                    interactive=st["residual_interactive"],
+                ),
+                st["seed_update"],
+                gr.update(interactive=st["inpaint_colored_bubbles_interactive"]),
+                gr.update(visible=st["show_cf_accounts"]),
+                gr.update(visible=st["show_colab_url"]),
             )
 
         outside_text_flux_backend.change(
@@ -3388,17 +3743,31 @@ def create_layout(
             inputs=[
                 outside_text_flux_backend,
                 outside_text_inpainting_method,
+                outside_text_flux_sdcpp_diffusion_quant_state,
                 outside_text_flux_sdcpp_text_encoder_quant_state,
+                outside_text_flux_num_inference_steps,
+                outside_text_flux_upscale_small_crops,
+                outside_text_flux_group_regions,
             ],
             outputs=[
                 outside_text_flux_backend,
                 outside_text_flux_backend_state,
+                outside_text_inpainting_method,
                 outside_text_flux_low_vram,
                 outside_text_flux_sdcpp_cache_mode,
                 outside_text_flux_sdcpp_diffusion_quant,
+                outside_text_flux_sdcpp_diffusion_quant_state,
                 outside_text_flux_sdcpp_text_encoder_quant,
                 outside_text_flux_sdcpp_text_encoder_quant_state,
+                outside_text_flux_num_inference_steps,
+                outside_text_flux_luminance_correction,
+                outside_text_flux_upscale_small_crops,
+                outside_text_flux_group_regions,
                 outside_text_flux_residual_diff_threshold,
+                outside_text_seed,
+                inpaint_colored_bubbles,
+                outside_text_cloudflare_accounts,
+                outside_text_colab_group,
             ],
             queue=False,
         )
@@ -3440,6 +3809,26 @@ def create_layout(
             fn=lambda enabled: gr.update(interactive=enabled),
             inputs=use_panel_sorting_checkbox,
             outputs=panel_confidence,
+            queue=False,
+        )
+
+        def _test_colab_connection_handler(url: str):
+            if not url or not url.strip():
+                return "⚠️ *Vui lòng dán link Cloudflare Tunnel (vd: https://xxxx.trycloudflare.com) trước.*"
+            try:
+                from core.image.colab_client import ColabClientManager
+                client = ColabClientManager(server_url=url.strip())
+                ok, msg = client.test_connection()
+                if ok:
+                    return f"✅ **Kết nối thành công!** Server: `{msg}`"
+                return f"❌ **Không thể kết nối:** {msg}"
+            except Exception as e:
+                return f"❌ **Lỗi:** {e}"
+
+        test_colab_connection_btn.click(
+            fn=_test_colab_connection_handler,
+            inputs=[outside_text_colab_server_url],
+            outputs=[colab_connection_status],
             queue=False,
         )
 
@@ -3586,20 +3975,50 @@ def create_layout(
 
         # Translator Tab Button
         clear_button.click(
-            fn=lambda: (None, None, gr.update(value="", lines=1)),
-            outputs=[input_image, output_image, status_message],
+            fn=lambda: (None, None, gr.update(value="", lines=1), gr.update(value="")),
+            outputs=[input_image, output_image, status_message, manual_txt_editor],
             queue=False,
         ).then(fn=None, js=js_reset_status_height, queue=False)
+        manual_json_translation.change(
+            fn=lambda checked: (
+                gr.update(visible=checked),
+                gr.update(visible=checked),
+                gr.update(visible=checked),
+            ),
+            inputs=[manual_json_translation],
+            outputs=[
+                manual_txt_editor,
+                batch_manual_txt_editor,
+                batch_ai_assistant_accordion,
+            ],
+            queue=False,
+        )
         batch_clear_button.click(
-            fn=lambda: (None, None, None, gr.update(value="", lines=1)),
+            fn=lambda: (
+                None,
+                None,
+                None,
+                gr.update(value="", lines=1),
+                gr.update(value=""),
+                [],
+            ),
             outputs=[
                 input_files,
                 input_zip,
                 batch_output_gallery,
                 batch_status_message,
+                batch_manual_txt_editor,
+                batch_chat_history,
             ],
             queue=False,
         ).then(fn=None, js=js_reset_status_height, queue=False)
+
+        input_image.change(
+            fn=callbacks.handle_input_image_change,
+            inputs=[input_image],
+            outputs=[manual_txt_editor],
+            queue=False,
+        )
 
         input_zip.change(
             fn=callbacks.handle_zip_or_failed_paths_upload,
@@ -3631,7 +4050,7 @@ def create_layout(
                 target_device=target_device,
             ),
             inputs=translate_inputs,
-            outputs=[output_image, status_message],
+            outputs=[output_image, status_message, manual_txt_editor],
         )
         translate_event.then(
             fn=functools.partial(
@@ -3682,7 +4101,8 @@ def create_layout(
                 target_device=target_device,
             ),
             inputs=batch_inputs,
-            outputs=[batch_output_gallery, batch_status_message],
+            outputs=[batch_output_gallery, batch_status_message, batch_manual_txt_editor],
+            show_progress_on=[batch_status_message],
         )
         batch_event.then(
             fn=functools.partial(
@@ -3706,6 +4126,60 @@ def create_layout(
             fn=callbacks.cancel_process,
             cancels=batch_event,
             queue=False,
+        )
+
+        # --- Batch Interactive Gemini Chat Event Listeners ---
+        batch_chat_model_selector.change(
+            fn=callbacks.handle_batch_chat_model_change,
+            inputs=[batch_chat_model_selector],
+            outputs=[batch_chat_status],
+        )
+        batch_chat_init_event = batch_chat_init_btn.click(
+            fn=callbacks.handle_batch_chat_init,
+            inputs=[batch_manual_txt_editor, batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_status],
+        )
+        batch_chat_send_event = batch_chat_send_btn.click(
+            fn=callbacks.handle_batch_chat_send,
+            inputs=[batch_chat_input, batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
+        )
+        batch_chat_submit_event = batch_chat_input.submit(
+            fn=callbacks.handle_batch_chat_send,
+            inputs=[batch_chat_input, batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
+        )
+        batch_chat_auto_all_event = batch_chat_auto_all_btn.click(
+            fn=callbacks.handle_batch_chat_auto_translate_all,
+            inputs=[batch_manual_txt_editor, batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
+        )
+        batch_chat_quick_check_role_event = batch_chat_quick_check_role_btn.click(
+            fn=callbacks.handle_batch_chat_quick_check_role,
+            inputs=[batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
+        )
+        batch_chat_cancel_btn.click(
+            fn=callbacks.handle_batch_chat_cancel,
+            inputs=[batch_chat_history],
+            outputs=[batch_chat_history, batch_chat_status],
+            cancels=[
+                batch_chat_init_event,
+                batch_chat_send_event,
+                batch_chat_submit_event,
+                batch_chat_auto_all_event,
+                batch_chat_quick_check_role_event,
+            ],
+        )
+        batch_chat_apply_btn.click(
+            fn=callbacks.handle_batch_chat_apply,
+            inputs=[batch_chat_history, batch_manual_txt_editor],
+            outputs=[batch_manual_txt_editor, batch_chat_status],
+        )
+        batch_chat_reset_btn.click(
+            fn=callbacks.handle_batch_chat_reset,
+            inputs=[batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_status],
         )
 
         app.load(

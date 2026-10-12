@@ -1,8 +1,11 @@
 import asyncio
 import base64
+import hashlib
+import json
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -42,6 +45,7 @@ from .image.image_utils import (
     upscale_image_to_dimension,
 )
 from .image.sorting import sort_bubbles_by_reading_order, sort_panels_by_reading_order
+from .image.tilt_detection import compute_effective_tilt_angle
 from .ml.model_manager import get_model_manager
 from .outside_text_processor import (
     finish_outside_text_work,
@@ -120,6 +124,12 @@ def _clean_speech_bubbles_for_page(
             flux_upscale_small_crops=config.outside_text.flux_upscale_small_crops,
             bubble_detector_model=config.detection.bubble_detector_model,
             request_coordinator=getattr(config, "request_coordinator", None),
+            auto_rotate_text=config.rendering.auto_rotate_text,
+            auto_rotate_confidence_threshold=getattr(
+                config.rendering, "auto_rotate_confidence_threshold", 0.5
+            ),
+            cloudflare_accounts=config.outside_text.cloudflare_accounts,
+            colab_server_url=config.outside_text.colab_server_url,
         )
         return cleaned_image_cv, processed_bubbles_info
     except CleaningError as e:
@@ -955,15 +965,90 @@ def translate_and_render(
         if cancellation_manager and cancellation_manager.is_cancelled():
             raise CancellationError("Process cancelled by user.")
 
+        _skipped_bboxes = set()
+        _manual_txt_map = {}
+        _manual_txt_done = False
+        
+        if config.translation.manual_json_translation:
+            _path_hash = hashlib.md5(Path(image_path).name.encode('utf-8')).hexdigest()
+            _meta_path = Path(tempfile.gettempdir()) / f"manga_tr_meta_{_path_hash}.json"
+            
+            _manual_in_memory = getattr(config.translation, "manual_translation_text", None)
+            if _manual_in_memory and _manual_in_memory.strip():
+                if not _meta_path.exists():
+                    raise TranslationError(f"[Manual TXT] File metadata không tồn tại. Vui lòng nhấn Translate lại để tạo mới.")
+                
+                try:
+                    with open(_meta_path, encoding="utf-8") as _mf:
+                        _meta_data = json.load(_mf)
+                    _meta_map = {int(_e["index"]): _e for _e in _meta_data}
+                    
+                    _current_idx = None
+                    for _line in _manual_in_memory.splitlines():
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        _m = re.match(r"^(\d+):\s*(.*?)(?:\s*\|\|\s*(.*))?$", _line)
+                        if _m:
+                            _idx = int(_m.group(1))
+                            _current_idx = _idx
+                            _content = _m.group(2).strip()
+                            _trans = (_m.group(3) or "").strip()
+                            
+                            if "||" not in _line:
+                                _original_meta = _meta_map.get(_idx, {}).get("original", "").strip()
+                                if _content == _original_meta:
+                                    _trans = ""
+                                else:
+                                    _trans = _content
+                            
+                            _manual_txt_map[_idx] = _trans
+                            
+                            _is_skip_text = (
+                                not _trans
+                                or _trans.strip() in (
+                                    "[OCR FAILED]",
+                                    "[TRANSLATION FAILED]",
+                                    "[NO TRANSLATION]",
+                                    "[Empty response / no content]",
+                                )
+                                or _content.strip() == "[OCR FAILED]"
+                            )
+                            if _is_skip_text:
+                                _bbox = _meta_map.get(_idx, {}).get("bbox")
+                                if _bbox and len(_bbox) == 4:
+                                    _skipped_bboxes.add(tuple(_bbox))
+                        elif _current_idx is not None:
+                            # Continuation line for the previous index
+                            if "||" in _line:
+                                _extra = _line.split("||", 1)[1].strip()
+                            else:
+                                _extra = _line.strip()
+                            if _extra:
+                                if _manual_txt_map.get(_current_idx):
+                                    _manual_txt_map[_current_idx] += "\n" + _extra
+                                else:
+                                    _manual_txt_map[_current_idx] = _extra
+                    
+                    log_message(f"[Manual TXT] Đã tải {len(_manual_txt_map)} bản dịch từ bộ nhớ. Bỏ qua redraw cho {len(_skipped_bboxes)} bong bóng.", always_print=True)
+                    _manual_txt_done = True
+                except Exception as _je:
+                    raise TranslationError(f"[Manual TXT] Lỗi xử lý bản dịch từ bộ nhớ: {_je}")
+                    
+        def _is_skipped(b):
+            _b_bbox = [int(round(v)) for v in b.get("bbox", [])]
+            return len(_b_bbox) == 4 and tuple(_b_bbox) in _skipped_bboxes
+
         processed_bubbles_info: List[Dict[str, Any]] = []
         pil_cleaned_image = pil_image_processed
         if not use_llm_inpaint_overlap:
             if bubble_data:
                 log_message("Cleaning speech bubbles...", verbose=verbose)
+                _clean_bubbles = [b for b in bubble_data if not _is_skipped(b)]
                 cleaned_image_cv, processed_bubbles_info = (
                     _clean_speech_bubbles_for_page(
                         pil_image_processed,
-                        bubble_data,
+                        _clean_bubbles,
                         config,
                         device,
                         processing_scale,
@@ -1102,7 +1187,7 @@ def translate_and_render(
                     page_image = pil_image_processed
                     osb_data = outside_text_data
                     if outside_work is not None:
-                        page_image, osb_data = finish_outside_text_work(outside_work)
+                        page_image, osb_data = finish_outside_text_work(outside_work, _skipped_bboxes)
                     fallback_cv = pil_to_cv2(page_image)
                     if bubble_data:
                         log_message("Cleaning speech bubbles...", verbose=verbose)
@@ -1284,14 +1369,15 @@ def translate_and_render(
                     page_image = pil_image_processed
                     osb_data = outside_text_data
                     if outside_work is not None:
-                        page_image, osb_data = finish_outside_text_work(outside_work)
+                        page_image, osb_data = finish_outside_text_work(outside_work, _skipped_bboxes)
                     fallback_cv = pil_to_cv2(page_image)
                     clean_info: List[Dict[str, Any]] = []
-                    if bubble_data:
+                    _clean_bubbles = [b for b in bubble_data if not _is_skipped(b)]
+                    if _clean_bubbles:
                         log_message("Cleaning speech bubbles...", verbose=verbose)
                         cleaned_cv, clean_info = _clean_speech_bubbles_for_page(
                             page_image,
-                            bubble_data,
+                            _clean_bubbles,
                             config,
                             device,
                             processing_scale,
@@ -1354,6 +1440,103 @@ def translate_and_render(
                     )
                     return texts, ocr_texts
 
+                # ── Manual TXT Translation Logic ──────────────────────────────
+                if config.translation.manual_json_translation:
+                    if _manual_txt_done:
+                        translated_texts = [
+                            _manual_txt_map.get(i + 1, "")
+                            for i in range(len(sorted_bubble_data))
+                        ]
+                        
+                        _meta_path = Path(tempfile.gettempdir()) / f"manga_tr_meta_{hashlib.md5(Path(image_path).name.encode('utf-8')).hexdigest()}.json"
+                        try:
+                            with open(_meta_path, encoding="utf-8") as _mf:
+                                _meta_data = json.load(_mf)
+                            current_ocr_texts = [
+                                (_entry.get("original") or "")
+                                for _entry in sorted(_meta_data, key=lambda e: e.get("index", 0))
+                            ]
+                            if current_ocr_texts and ocr_texts_out is not None:
+                                ocr_texts_out.extend(current_ocr_texts)
+                        except Exception as e:
+                            log_message(f"[Manual TXT] Failed to load metadata for OCR texts: {e}")
+
+                        if not translated_texts or not any(t.strip() for t in translated_texts):
+                            raise TranslationError(
+                                f"[Manual TXT] File không có bản dịch nào. "
+                                "Hãy điền ít nhất một bản dịch rồi bấm Translate lại."
+                            )
+                        
+                        if use_llm_inpaint_overlap:
+                            (
+                                pil_image_processed,
+                                outside_text_data,
+                                cleaned_image_cv,
+                                processed_bubbles_info,
+                            ) = _run_deferred_inpaint_and_clean()
+                            pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
+                            if pil_cleaned_image.mode != target_mode:
+                                pil_cleaned_image = pil_cleaned_image.convert(target_mode)
+                            final_image_to_save = pil_cleaned_image
+                    else:
+                        # ── Lần 1: Gọi Google API, lưu file TXT và Meta JSON rồi dừng ──
+                        log_message(
+                            f"[Manual TXT] No TXT file found. Running Google API for reference translations...",
+                            always_print=True,
+                        )
+                        _api_ocr_texts: List[str] = []
+                        _api_translations: List[str] = []
+                        try:
+                            _api_translations, _api_ocr_texts = _run_llm_translation()
+                        except Exception as _api_err:
+                            log_message(
+                                f"[Manual TXT] Google API failed ({_api_err}), creating empty template...",
+                                always_print=True,
+                            )
+                            _api_translations = ["" for _ in sorted_bubble_data]
+                            _api_ocr_texts = ["" for _ in sorted_bubble_data]
+
+                        # Pad lists if needed
+                        _n = len(sorted_bubble_data)
+                        while len(_api_translations) < _n:
+                            _api_translations.append("")
+                        while len(_api_ocr_texts) < _n:
+                            _api_ocr_texts.append("")
+
+                        # Build TXT and Meta entries
+                        _txt_lines = []
+                        _meta_entries = []
+                        for _i, _bubble in enumerate(sorted_bubble_data):
+                            _bbox = [int(round(v)) for v in _bubble.get("bbox", [0, 0, 0, 0])]
+                            _clean_ocr = " ".join(_api_ocr_texts[_i].splitlines())
+                            _txt_lines.append(f"{_i + 1}: {_clean_ocr} || {_api_translations[_i]}")
+                            _meta_entries.append({
+                                "index": _i + 1,
+                                "bbox": _bbox,
+                                "original": _api_ocr_texts[_i]
+                            })
+
+                        # Save Meta
+                        _meta_path = Path(tempfile.gettempdir()) / f"manga_tr_meta_{hashlib.md5(Path(image_path).name.encode('utf-8')).hexdigest()}.json"
+
+                        try:
+                            with open(_meta_path, "w", encoding="utf-8") as _mf:
+                                json.dump(_meta_entries, _mf, ensure_ascii=False, indent=2)
+                        except OSError as _oe:
+                            log_message(
+                                f"[Manual TXT] Could not save Meta file: {_oe}",
+                                always_print=True,
+                            )
+
+                        _txt_content_str = "\n".join(_txt_lines)
+                        raise TranslationError(
+                            f"[Manual TXT] Đã tạo bản dịch mẫu.\n"
+                            f"--- CONTENT START ---\n"
+                            f"{_txt_content_str}\n"
+                            f"--- CONTENT END ---"
+                        )
+                # ──────────────────────────────────────────────────────────────
+
                 if not bubble_images_b64:
                     log_message("No valid bubbles after sorting", always_print=True)
                     if use_llm_inpaint_overlap:
@@ -1367,7 +1550,7 @@ def translate_and_render(
                         if pil_cleaned_image.mode != target_mode:
                             pil_cleaned_image = pil_cleaned_image.convert(target_mode)
                         final_image_to_save = pil_cleaned_image
-                else:
+                elif not getattr(config.translation, "manual_json_translation", False) or not _manual_txt_done:
                     if getattr(config, "test_mode", False):
                         translated_texts = generate_test_placeholders(
                             sorted_bubble_data=sorted_bubble_data,
@@ -1431,6 +1614,12 @@ def translate_and_render(
                                     "quota",
                                     "empty response",
                                     "api failed",
+                                    # Content-safety blocks — rotating keys will not help
+                                    "prohibited_content",
+                                    "safety",
+                                    "prompt blocked",
+                                    "no candidates",
+                                    "key rotation skipped",
                                 )
                                 if any(token in error_str for token in critical_tokens):
                                     raise
@@ -1484,6 +1673,12 @@ def translate_and_render(
                                 "quota",
                                 "empty response",
                                 "api failed",
+                                # Content-safety blocks — rotating keys will not help
+                                "prohibited_content",
+                                "safety",
+                                "prompt blocked",
+                                "no candidates",
+                                "key rotation skipped",
                             )
                             if any(token in error_str for token in critical_tokens):
                                 raise
@@ -1540,6 +1735,7 @@ def translate_and_render(
                         "is_colored": info.get("is_colored", False),
                         "text_bbox": info.get("text_bbox"),
                         "text_color_bgr": info.get("text_color_bgr"),
+                        "rotation_deg": info.get("rotation_deg", 0.0),
                     }
                     for info in processed_bubbles_info
                     if "bbox" in info and "color" in info and "mask" in info
@@ -1608,6 +1804,33 @@ def translate_and_render(
                             )
                             min_font = osb_min_font
                             max_font = osb_max_font
+
+                            # Dynamically anchor max_font to original text font size
+                            raw_bbox = bubble.get("original_bbox") or bubble.get("bbox")
+                            if raw_bbox and len(raw_bbox) == 4:
+                                rx1, ry1, rx2, ry2 = [int(c) for c in raw_bbox]
+                                raw_w = max(1, rx2 - rx1)
+                                raw_h = max(1, ry2 - ry1)
+
+                                obb_dims = bubble.get("oriented_dimensions")
+                                if obb_dims and len(obb_dims) == 2 and obb_dims[1] > 0:
+                                    text_h = float(obb_dims[1])
+                                else:
+                                    text_h = float(raw_h)
+
+                                raw_ocr = bubble.get("ocr_text", "")
+                                ocr_lines = [l for l in raw_ocr.splitlines() if l.strip()]
+                                if ocr_lines:
+                                    n_orig_lines = len(ocr_lines)
+                                else:
+                                    n_orig_lines = 1 if (float(raw_w) / float(raw_h) >= 2.0) else 2
+
+                                orig_line_h = text_h / float(max(1, n_orig_lines))
+                                # Standard Latin Cap-Height is ~0.70 of font_size.
+                                # To match visual height of original Kanji/CJK characters,
+                                # the target font size for Latin capitals is orig_line_h / 0.70.
+                                target_font_size = orig_line_h / 0.70
+                                max_font = max(min_font, min(osb_max_font, int(round(target_font_size))))
                             line_spacing = config.outside_text.osb_line_spacing
                             use_ligs = config.outside_text.osb_use_ligatures
                             # Outside text was inpainted, no mask needed
@@ -1617,9 +1840,35 @@ def translate_and_render(
                             bubble_color_bgr = (
                                 (50, 50, 50) if is_dark_text else (255, 255, 255)
                             )
-                            # OSB renders default to horizontal; vertical stacking is fallback-only
+                            # OSB renders default to horizontal; apply tilt if follow_tilt is enabled
                             rotation_deg = 0.0
                             vertical_stack = False
+
+                            if getattr(config.outside_text, "osb_follow_tilt", False):
+                                rotation_deg = compute_effective_tilt_angle(
+                                    tilt_deg=float(bubble.get("tilt_deg", 0.0) or 0.0),
+                                    tilt_conf=float(
+                                        bubble.get("tilt_conf", 0.0) or 0.0
+                                    ),
+                                    follow_tilt=config.outside_text.osb_follow_tilt,
+                                    confidence_threshold=getattr(
+                                        config.outside_text,
+                                        "osb_tilt_confidence_threshold",
+                                        0.5,
+                                    ),
+                                    min_tilt_deg=getattr(
+                                        config.outside_text, "osb_min_tilt_deg", 3.0
+                                    ),
+                                    max_tilt_deg=getattr(
+                                        config.outside_text, "osb_max_tilt_deg", 20.0
+                                    ),
+                                )
+                                if abs(rotation_deg) > 0.01:
+                                    conf = float(bubble.get("tilt_conf", 0.0) or 0.0)
+                                    log_message(
+                                        f"OSB tilt applied: {rotation_deg:.1f} deg (conf: {conf:.2f}, axis: {bubble.get('tilt_axis', 'none')})",
+                                        verbose=verbose,
+                                    )
 
                             text_bg_rgb = None
                             if bubble.get("needs_text_background"):
@@ -1664,9 +1913,11 @@ def translate_and_render(
                                         text_color_bgr_val[1],
                                         text_color_bgr_val[0],
                                     )
-                            # No rotation/stacking for regular bubbles
+                            # Regular bubbles: default to horizontal, support auto-rotation if enabled
                             vertical_stack = False
                             rotation_deg = 0.0
+                            if config.rendering.auto_rotate_text and render_info:
+                                rotation_deg = float(render_info.get("rotation_deg", 0.0) or 0.0)
 
                         # Latin languages use hyphenation; Korean/Thai use
                         # no-hyphen emergency breaks under the same user setting.
@@ -1787,38 +2038,83 @@ def translate_and_render(
                                             f"Vertical-stack fallback failed: {e2}",
                                             verbose=verbose,
                                         )
-                                        # Restore original OSB patch if available
-                                        if "original_crop_pil" in bubble:
-                                            log_message(
-                                                f"Restoring original OSB patch for {bbox}",
-                                                verbose=verbose,
-                                                always_print=True,
+                                        # Emergency render fallback: keep clean inpainting and draw translation
+                                        try:
+                                            emergency_config = RenderingConfig(
+                                                min_font_size=6,
+                                                max_font_size=max(8, min_font),
+                                                line_spacing_mult=0.9,
+                                                use_ligatures=False,
+                                                hyphenate_before_scaling=True,
+                                                supersampling_factor=1,
                                             )
-                                            rendered_image = pil_cleaned_image.copy()
-                                            original_patch = bubble["original_crop_pil"]
-                                            rendered_image.paste(
-                                                original_patch, (bbox[0], bbox[1])
+                                            rendered_image = render_text_skia(
+                                                pil_image=pil_cleaned_image,
+                                                text=text,
+                                                bbox=bbox,
+                                                font_dir=font_dir,
+                                                cleaned_mask=cleaned_mask,
+                                                bubble_color_bgr=bubble_color_bgr,
+                                                config=emergency_config,
+                                                verbose=verbose,
+                                                bubble_id=str(i + 1),
+                                                rotation_deg=0.0,
+                                                vertical_stack=False,
+                                                text_color_rgb=text_color_rgb,
+                                                raise_on_safe_error=False,
+                                                text_background_color=text_bg_rgb,
+                                                fallback_padding_pixels=0.0,
                                             )
                                             success = True
-                                        else:
-                                            rendered_image = pil_cleaned_image
-                                            success = False
+                                        except Exception as e3:
+                                            log_message(
+                                                f"Emergency render fallback failed: {e3}; drawing text with PIL",
+                                                verbose=verbose,
+                                            )
+                                            rendered_image = pil_cleaned_image.copy()
+                                            draw = ImageDraw.Draw(rendered_image)
+                                            draw_col = text_color_rgb if text_color_rgb else ((0, 0, 0) if is_dark_text else (255, 255, 255))
+                                            draw.text((bbox[0], bbox[1]), text, fill=draw_col)
+                                            success = True
                                 else:
-                                    if "original_crop_pil" in bubble:
-                                        log_message(
-                                            f"Restoring original OSB patch for {bbox}",
-                                            verbose=verbose,
-                                            always_print=True,
+                                    # Emergency render fallback when vertical_stack was already tried
+                                    try:
+                                        emergency_config = RenderingConfig(
+                                            min_font_size=6,
+                                            max_font_size=max(8, min_font),
+                                            line_spacing_mult=0.9,
+                                            use_ligatures=False,
+                                            hyphenate_before_scaling=True,
+                                            supersampling_factor=1,
                                         )
-                                        rendered_image = pil_cleaned_image.copy()
-                                        original_patch = bubble["original_crop_pil"]
-                                        rendered_image.paste(
-                                            original_patch, (bbox[0], bbox[1])
+                                        rendered_image = render_text_skia(
+                                            pil_image=pil_cleaned_image,
+                                            text=text,
+                                            bbox=bbox,
+                                            font_dir=font_dir,
+                                            cleaned_mask=cleaned_mask,
+                                            bubble_color_bgr=bubble_color_bgr,
+                                            config=emergency_config,
+                                            verbose=verbose,
+                                            bubble_id=str(i + 1),
+                                            rotation_deg=0.0,
+                                            vertical_stack=False,
+                                            text_color_rgb=text_color_rgb,
+                                            raise_on_safe_error=False,
+                                            text_background_color=text_bg_rgb,
+                                            fallback_padding_pixels=0.0,
                                         )
                                         success = True
-                                    else:
-                                        rendered_image = pil_cleaned_image
-                                        success = False
+                                    except Exception as e3:
+                                        log_message(
+                                            f"Emergency render fallback failed: {e3}; drawing text with PIL",
+                                            verbose=verbose,
+                                        )
+                                        rendered_image = pil_cleaned_image.copy()
+                                        draw = ImageDraw.Draw(rendered_image)
+                                        draw_col = text_color_rgb if text_color_rgb else ((0, 0, 0) if is_dark_text else (255, 255, 255))
+                                        draw.text((bbox[0], bbox[1]), text, fill=draw_col)
+                                        success = True
                         else:
                             try:
                                 rendered_image = render_text_skia(
@@ -1906,6 +2202,10 @@ def translate_and_render(
                                                 ),
                                             }
                                         )
+                                        if config.rendering.auto_rotate_text:
+                                            rotation_deg = float(
+                                                retry_result.get("rotation_deg", rotation_deg) or 0.0
+                                            )
 
                                     try:
                                         rendered_image = render_text_skia(
@@ -2068,10 +2368,17 @@ def _should_run_failed_retry(
     config: MangaTranslatorConfig,
     failed_jobs: List[Dict[str, Any]],
     cancellation_manager: Optional["CancellationManager"] = None,
+    results: Optional[Dict[str, Any]] = None,
 ) -> bool:
     if not getattr(config, "retry_failed_once", False):
         return False
-    if not failed_jobs:
+    errors_map = results.get("errors", {}) if results else {}
+    actual_failures = []
+    for j in failed_jobs:
+        err_msg = j.get("error_msg") or errors_map.get(j.get("error_key"), "")
+        if "[Manual TXT]" not in str(err_msg):
+            actual_failures.append(j)
+    if not actual_failures:
         return False
     if cancellation_manager is not None and cancellation_manager.is_cancelled():
         return False
@@ -2089,13 +2396,14 @@ def _retry_failed_batch_images(
     cancellation_manager: Optional["CancellationManager"] = None,
     source_path_map: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Retry failed batch images once. Mutates *results* in place.
-
-    Each entry in *failed_jobs* must include:
-      - error_key: key used in results["errors"]
-      - img_path: processing Path passed to translate_and_render
-      - source_path: path stored in results["failed_image_paths"]
-    """
+    """Retry failed batch images once. Mutates *results* in place."""
+    errors_map = results.get("errors", {}) if results else {}
+    actual_failures = []
+    for j in failed_jobs:
+        err_msg = j.get("error_msg") or errors_map.get(j.get("error_key"), "")
+        if "[Manual TXT]" not in str(err_msg):
+            actual_failures.append(j)
+    failed_jobs = actual_failures
     if not failed_jobs:
         results.setdefault("retry_attempted_count", 0)
         results.setdefault("retry_success_count", 0)
@@ -2221,6 +2529,8 @@ async def _batch_translate_parallel(
     progress_callback: Optional[Callable[[float, str], None]],
     cancellation_manager: Optional["CancellationManager"],
     source_path_map: Optional[Dict[str, str]] = None,
+    batch_manual_translations: Optional[Dict[str, str]] = None,
+    on_template_ready: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """Process images in parallel using a semaphore to maintain target concurrency.
 
@@ -2293,9 +2603,16 @@ async def _batch_translate_parallel(
             ocr_text_history_lock,
         )
         first_ocr_texts: List[str] = []
+        first_img_config = config
+        if batch_manual_translations and first_img.name in batch_manual_translations:
+            import copy
+            first_img_config = copy.copy(config)
+            first_img_config.translation = copy.copy(config.translation)
+            first_img_config.translation.manual_translation_text = batch_manual_translations[first_img.name]
+
         translate_and_render(
             first_img,
-            config,
+            first_img_config,
             first_output,
             cancellation_manager=cancellation_manager,
             previous_context_images=first_previous_context_images,
@@ -2309,6 +2626,10 @@ async def _batch_translate_parallel(
     except CancellationError:
         raise
     except Exception as e:
+        if "--- CONTENT START ---" in str(e) and on_template_ready:
+            m_str = re.search(r"--- CONTENT START ---\n(.*?)\n--- CONTENT END ---", str(e), re.DOTALL)
+            if m_str:
+                on_template_ready(first_img.name, m_str.group(1).strip())
         log_message(f"Error processing {first_display}: {str(e)}", always_print=True)
         source_path = resolve_source_path(first_img, source_path_map)
         results["error_count"] += 1
@@ -2319,6 +2640,7 @@ async def _batch_translate_parallel(
                 "error_key": first_key,
                 "img_path": first_img,
                 "source_path": source_path,
+                "error_msg": str(e),
             }
         )
     finally:
@@ -2385,9 +2707,16 @@ async def _batch_translate_parallel(
             )
 
         captured_ocr_texts: List[str] = []
+        single_img_config = config
+        if batch_manual_translations and img_path.name in batch_manual_translations:
+            import copy
+            single_img_config = copy.copy(config)
+            single_img_config.translation = copy.copy(config.translation)
+            single_img_config.translation.manual_translation_text = batch_manual_translations[img_path.name]
+
         translate_and_render(
             img_path,
-            config,
+            single_img_config,
             output_path,
             cancellation_manager=cancellation_manager,
             previous_context_images=previous_context_images,
@@ -2428,6 +2757,10 @@ async def _batch_translate_parallel(
                     cancelled = True
                     raise
                 except Exception as e:
+                    if "--- CONTENT START ---" in str(e) and on_template_ready:
+                        m_str = re.search(r"--- CONTENT START ---\n(.*?)\n--- CONTENT END ---", str(e), re.DOTALL)
+                        if m_str:
+                            on_template_ready(img_path.name, m_str.group(1).strip())
                     _, display_path, error_key = _resolve_output_path(
                         img_path, input_dir, output_dir, config, preserve_structure
                     )
@@ -2445,6 +2778,7 @@ async def _batch_translate_parallel(
                                 "error_key": error_key,
                                 "img_path": img_path,
                                 "source_path": source_path,
+                                "error_msg": str(e),
                             }
                         )
                         completed_count += 1
@@ -2486,6 +2820,8 @@ def batch_translate_images(
     preserve_structure: bool = False,
     cancellation_manager: Optional["CancellationManager"] = None,
     source_path_map: Optional[Dict[str, str]] = None,
+    batch_manual_translations: Optional[Dict[str, str]] = None,
+    on_template_ready: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """
     Process all images in a directory using a configuration object.
@@ -2555,6 +2891,9 @@ def batch_translate_images(
         return _natural_path_sort_key(sort_path)
 
     image_files.sort(key=_batch_sort_key)
+    if batch_manual_translations:
+        order_map = {name: idx for idx, name in enumerate(batch_manual_translations.keys())}
+        image_files.sort(key=lambda p: (0 if p.name in order_map else 1, order_map.get(p.name, 999999), _batch_sort_key(p)))
 
     if not image_files:
         log_message(f"No image files found in '{input_dir}'", always_print=True)
@@ -2577,6 +2916,8 @@ def batch_translate_images(
                 progress_callback=progress_callback,
                 cancellation_manager=cancellation_manager,
                 source_path_map=source_path_map,
+                batch_manual_translations=batch_manual_translations,
+                on_template_ready=on_template_ready,
             )
         )
         failed_jobs = results.pop("_failed_jobs", [])
@@ -2632,9 +2973,16 @@ def batch_translate_images(
                     ocr_text_history_lock,
                 )
                 captured_ocr_texts: List[str] = []
+                seq_img_config = config
+                if batch_manual_translations and img_path.name in batch_manual_translations:
+                    import copy
+                    seq_img_config = copy.copy(config)
+                    seq_img_config.translation = copy.copy(config.translation)
+                    seq_img_config.translation.manual_translation_text = batch_manual_translations[img_path.name]
+
                 translate_and_render(
                     img_path,
-                    config,
+                    seq_img_config,
                     output_path,
                     cancellation_manager=cancellation_manager,
                     previous_context_images=previous_context_images,
@@ -2661,6 +3009,10 @@ def batch_translate_images(
                 )
                 raise
             except Exception as e:
+                if "--- CONTENT START ---" in str(e) and on_template_ready:
+                    m_str = re.search(r"--- CONTENT START ---\n(.*?)\n--- CONTENT END ---", str(e), re.DOTALL)
+                    if m_str:
+                        on_template_ready(img_path.name, m_str.group(1).strip())
                 log_message(
                     f"Error processing {display_path}: {str(e)}", always_print=True
                 )
@@ -2673,6 +3025,7 @@ def batch_translate_images(
                         "error_key": error_key,
                         "img_path": img_path,
                         "source_path": source_path,
+                        "error_msg": str(e),
                     }
                 )
 
@@ -2683,7 +3036,7 @@ def batch_translate_images(
                         f"Completed {i + 1}/{total_images} images (with errors)",
                     )
 
-    if _should_run_failed_retry(config, failed_jobs, cancellation_manager):
+    if _should_run_failed_retry(config, failed_jobs, cancellation_manager, results=results):
         _retry_failed_batch_images(
             failed_jobs=failed_jobs,
             results=results,
@@ -2703,11 +3056,21 @@ def batch_translate_images(
     total_batch_time = end_batch_time - start_batch_time
     seconds_per_image = total_batch_time / total_images if total_images > 0 else 0
 
-    log_message(
-        f"Batch complete: {results['success_count']}/{total_images} images in "
-        f"{total_batch_time:.2f}s ({seconds_per_image:.2f}s/image)",
-        always_print=True,
+    manual_mode_l1 = (
+        getattr(config.translation, "manual_json_translation", False)
+        and not getattr(config.translation, "manual_translation_text", "").strip()
     )
+    if manual_mode_l1:
+        log_message(
+            f"[Manual TXT] Đã sinh thành công bản dịch mẫu cho {total_images} ảnh vào TextBox trong {total_batch_time:.2f}s.",
+            always_print=True,
+        )
+    else:
+        log_message(
+            f"Batch complete: {results['success_count']}/{total_images} images in "
+            f"{total_batch_time:.2f}s ({seconds_per_image:.2f}s/image)",
+            always_print=True,
+        )
     if results.get("retry_attempted_count"):
         log_message(
             f"Retry pass: {results.get('retry_success_count', 0)} recovered, "
@@ -2720,14 +3083,14 @@ def batch_translate_images(
         for filename, error_msg in results["errors"].items():
             log_message(f"  - {filename}: {error_msg}", always_print=True)
 
-    failed_paths = results.get("failed_image_paths") or []
-    if failed_paths:
-        failed_file = write_failed_paths(output_dir, failed_paths)
-        if failed_file:
-            results["failed_paths_file"] = str(failed_file)
-            log_message(
-                f"Failed image paths saved to: {failed_file}",
-                always_print=True,
-            )
+    # failed_paths = results.get("failed_image_paths") or []
+    # if failed_paths:
+    #     failed_file = write_failed_paths(output_dir, failed_paths)
+    #     if failed_file:
+    #         results["failed_paths_file"] = str(failed_file)
+    #         log_message(
+    #             f"Failed image paths saved to: {failed_file}",
+    #             always_print=True,
+    #         )
 
     return results

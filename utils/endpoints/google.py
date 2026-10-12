@@ -95,7 +95,11 @@ def call_gemini_endpoint(
                 prompt_feedback = result.get("promptFeedback")
                 if prompt_feedback and prompt_feedback.get("blockReason"):
                     block_reason = prompt_feedback.get("blockReason")
-                    return None
+                    log_message(
+                        f"Google API: Prompt blocked. Block reason: {block_reason}",
+                        always_print=True,
+                    )
+                    raise TranslationError(f"Google API: Prompt blocked. Block reason: {block_reason}")
 
                 if "candidates" in result and len(result["candidates"]) > 0:
                     candidate = result["candidates"][0]
@@ -119,7 +123,7 @@ def call_gemini_endpoint(
                         f"Full response: {json.dumps(result, indent=2)}",
                         verbose=debug,
                     )
-                    return ""
+                    raise TranslationError(f"Google API: No content. Finish reason: {finish_reason}")
 
                 else:
                     block_reason = (
@@ -135,7 +139,7 @@ def call_gemini_endpoint(
                         f"Full response: {json.dumps(result, indent=2)}",
                         verbose=debug,
                     )
-                    return None
+                    raise TranslationError(f"Google API: No candidates. Block reason: {block_reason}")
 
             except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
                 raise TranslationError(
@@ -146,20 +150,24 @@ def call_gemini_endpoint(
             status_code = e.response.status_code
             error_text = e.response.text[:500]  # Limit error text length
 
-            if status_code == 429 and attempt < max_retries:
+            if status_code == 429:
+                # Do NOT retry 429 with the same key — let the key rotation
+                # logic in translation.py try a different key immediately.
+                # Retrying here wastes RPD quota on the same exhausted key.
+                raise TranslationError(
+                    f"Google API HTTP Error: Rate limited: {error_text}"
+                ) from e
+            elif attempt < max_retries:
                 log_message(
-                    f"Rate limited, retrying in {current_delay:.1f}s", verbose=debug
+                    f"HTTP {status_code}, retrying in {current_delay:.1f}s",
+                    verbose=debug,
                 )
                 time.sleep(current_delay)
                 continue
             else:
-                error_reason = f"Status {status_code}: {error_text}"
-                if status_code == 429 and attempt == max_retries:
-                    error_reason = (
-                        f"Rate limited after {max_retries + 1} attempts: {error_text}"
-                    )
-
-                raise TranslationError(f"Google API HTTP Error: {error_reason}") from e
+                raise TranslationError(
+                    f"Google API HTTP Error: Status {status_code}: {error_text}"
+                ) from e
 
         except requests.exceptions.RequestException as e:
             if attempt < max_retries:

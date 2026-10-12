@@ -90,7 +90,7 @@ FLUX_SDCPP_T5_QUANTS = tuple(
 FLUX_SDCPP_TEXT_ENCODER_QUANTS = FLUX_SDCPP_QWEN_QUANTS + tuple(
     quant for quant in FLUX_SDCPP_T5_QUANTS if quant not in FLUX_SDCPP_QWEN_QUANTS
 )
-FLUX_BACKENDS = ("sdcpp", "sdnq", "nunchaku")
+FLUX_BACKENDS = ("sdcpp", "sdnq", "nunchaku", "cloudflare", "remote_colab")
 
 
 def flux_sdcpp_text_encoder_asset_key(model_key: str) -> Optional[str]:
@@ -135,9 +135,13 @@ def flux_sdcpp_valid_text_encoder_quant(model_key: str, quant: str) -> str:
 
 def flux_valid_backend(model_key: str, backend: str) -> str:
     if model_key in ("flux_klein_4b", "flux_klein_9b"):
-        return backend if backend in ("sdcpp", "sdnq") else "sdnq"
+        return backend if backend in ("sdcpp", "sdnq", "cloudflare", "remote_colab") else "sdnq"
+    if model_key == "sd_inpainting":
+        return backend if backend in ("cloudflare", "remote_colab") else "cloudflare"
+    if model_key == "flux_dev":
+        return "cloudflare"
     if model_key == "flux_kontext":
-        return backend if backend in FLUX_BACKENDS else "sdnq"
+        return backend if backend in ("sdcpp", "sdnq", "nunchaku") else "sdnq"
     return backend if backend in FLUX_BACKENDS else "sdnq"
 
 

@@ -51,14 +51,52 @@ def _radio_choices(values):
 
 def _flux_backend_choices(method: str):
     if method in ("flux_klein_9b", "flux_klein_4b"):
-        return [("sd.cpp", "sdcpp"), ("SDNQ", "sdnq")]
+        return [
+            ("sd.cpp", "sdcpp"),
+            ("SDNQ", "sdnq"),
+            ("Cloudflare Workers AI", "cloudflare"),
+            ("Remote Colab (T4 GPU)", "remote_colab"),
+        ]
+    if method in ("flux_dev", "sd_inpainting"):
+        return [
+            ("Cloudflare Workers AI", "cloudflare"),
+            ("Remote Colab (T4 GPU)", "remote_colab"),
+        ]
     if method == "flux_kontext":
         return [
             ("sd.cpp", "sdcpp"),
             ("SDNQ", "sdnq"),
             ("Nunchaku (CUDA)", "nunchaku"),
         ]
-    return [("SDNQ", "sdnq")]
+    return [
+        ("SDNQ", "sdnq"),
+        ("Cloudflare Workers AI", "cloudflare"),
+        ("Remote Colab (T4 GPU)", "remote_colab"),
+    ]
+
+
+_INPAINTING_METHOD_CHOICES_LOCAL = [
+    ("Flux.2 Klein 9B", "flux_klein_9b"),
+    ("Flux.2 Klein 4B", "flux_klein_4b"),
+    ("Flux.1 Kontext (12B)", "flux_kontext"),
+    ("OpenCV", "opencv"),
+    ("None (text background)", "none"),
+]
+
+_INPAINTING_METHOD_CHOICES_CLOUDFLARE = [
+    ("Flux.2 Klein 4B", "flux_klein_4b"),
+    ("Flux.2 Klein 9B", "flux_klein_9b"),
+    ("Flux.2 Dev", "flux_dev"),
+    ("SD 1.5 Inpainting", "sd_inpainting"),
+    ("OpenCV", "opencv"),
+    ("None (text background)", "none"),
+]
+
+
+def _inpainting_method_choices(backend: str):
+    if backend in ("cloudflare", "remote_colab"):
+        return _INPAINTING_METHOD_CHOICES_CLOUDFLARE
+    return _INPAINTING_METHOD_CHOICES_LOCAL
 
 
 def _clean_error_message(message: Any) -> str:
@@ -166,6 +204,8 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
         auto_vertical_text_val,
         vertical_line_spacing_mult_val,
         vertical_font_size_mult_val,
+        auto_rotate_text_val,
+        auto_rotate_confidence_threshold_val,
         hyphen_penalty_val,
         hyphenation_min_word_length_val,
         badness_exponent_val,
@@ -175,6 +215,8 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
         outside_text_seed_val,
         outside_text_inpainting_method_val,
         outside_text_flux_backend_val,
+        outside_text_cloudflare_accounts_val,
+        outside_text_colab_server_url_val,
         outside_text_flux_low_vram_val,
         outside_text_flux_sdcpp_cache_mode_val,
         outside_text_flux_sdcpp_diffusion_quant_val,
@@ -226,6 +268,7 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
         batch_retry_failed_once_val,
         batch_previous_context_image_count_val,
         batch_previous_context_text_count_val,
+        manual_json_translation_val,
     ) = args
 
     final_input_language = batch_input_language if is_batch else input_language
@@ -261,6 +304,8 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
             huggingface_token=outside_text_huggingface_token_val,
             inpainting_method=outside_text_inpainting_method_val,
             flux_backend=outside_text_flux_backend_val,
+            cloudflare_accounts=outside_text_cloudflare_accounts_val,
+            colab_server_url=outside_text_colab_server_url_val,
             flux_low_vram=outside_text_flux_low_vram_val,
             flux_sdcpp_cache_mode=outside_text_flux_sdcpp_cache_mode_val,
             flux_sdcpp_diffusion_quant=outside_text_flux_sdcpp_diffusion_quant_val,
@@ -337,6 +382,7 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
             openrouter_api_key=openrouter_api_key,
             openai_compatible_url=openai_compatible_url_input,
             openai_compatible_api_key=openai_compatible_api_key_input,
+            manual_json_translation=manual_json_translation_val,
         ),
         llm_settings=UITranslationLLMSettings(
             model_name=config_model_name,
@@ -367,6 +413,8 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
             auto_vertical_text=auto_vertical_text_val,
             vertical_line_spacing_mult=float(vertical_line_spacing_mult_val),
             vertical_font_size_mult=float(vertical_font_size_mult_val),
+            auto_rotate_text=bool(auto_rotate_text_val),
+            auto_rotate_confidence_threshold=float(auto_rotate_confidence_threshold_val),
             hyphen_penalty=hyphen_penalty_val,
             hyphenation_min_word_length=hyphenation_min_word_length_val,
             badness_exponent=badness_exponent_val,
@@ -812,9 +860,11 @@ def handle_translate_click(
     models_dir: Path,
     fonts_base_dir: Path,
     target_device: Optional[torch.device],
-) -> Tuple[Optional[Image.Image], str]:
+) -> Tuple[Optional[Image.Image], str, Any]:
     """Callback for the 'Translate' button click. Uses dataclasses for config."""
-    input_image_path = args[0]
+    manual_txt_val = args[-1]
+    ui_args = args[:-1]
+    input_image_path = ui_args[0]
     start_time = time.time()
     global CANCELLATION_MANAGER
     CANCELLATION_MANAGER = CancellationManager()
@@ -823,9 +873,17 @@ def handle_translate_click(
         if not img_valid:
             raise gr.Error(f"{ERROR_PREFIX}{img_msg}")
 
-        ui_state = _build_ui_state_from_args(args[1:], is_batch=False)
+        ui_state = _build_ui_state_from_args(ui_args[1:], is_batch=False)
 
         _validate_ui_state(ui_state)
+
+        # Auto-save special instructions to settings
+        try:
+            settings = settings_manager.get_saved_settings()
+            settings["special_instructions"] = ui_state.llm_settings.special_instructions
+            settings_manager.save_config(settings)
+        except Exception:
+            pass
 
         backend_config = map_ui_to_backend_config(
             ui_state=ui_state,
@@ -833,6 +891,58 @@ def handle_translate_click(
             target_device=target_device,
             is_batch=False,
         )
+        
+        # Check mismatch for manual txt
+        if manual_txt_val and isinstance(manual_txt_val, str) and manual_txt_val.strip() and backend_config.translation.manual_json_translation:
+            _json_base = Path(input_image_path)
+            _base_name = _json_base.name.split('_translated_')[0] if '_translated_' in _json_base.name else _json_base.stem
+            
+            import hashlib
+            import tempfile
+            import json
+            import re
+            
+            _path_hash = hashlib.md5(Path(input_image_path).name.encode('utf-8')).hexdigest()
+            _meta_path = Path(tempfile.gettempdir()) / f"manga_tr_meta_{_path_hash}.json"
+            
+            mismatch = False
+            if not _meta_path.exists():
+                mismatch = True
+            else:
+                try:
+                    with open(_meta_path, "r", encoding="utf-8") as f:
+                        _meta_data = json.load(f)
+                    _meta_map = {int(e["index"]): e for e in _meta_data}
+                    
+                    for _line in manual_txt_val.splitlines():
+                        _m = re.match(r"^(\d+):\s*(.*?)(?:\s*\|\|\s*(.*))?$", _line.strip())
+                        if _m:
+                            _idx = int(_m.group(1))
+                            _content = _m.group(2).strip()
+                            _original_meta = _meta_map.get(_idx, {}).get("original", "").strip()
+                            if _content and _original_meta and _content != _original_meta:
+                                mismatch = True
+                                break
+                except Exception:
+                    mismatch = True
+            
+            if mismatch:
+                # Force Lần 1 generation
+                backend_config.translation.manual_translation_text = ""
+            else:
+                # Set the translation text in config in-memory
+                backend_config.translation.manual_translation_text = manual_txt_val.strip()
+                # Write updated box content to backup folder
+                try:
+                    backup_dir = Path(r"C:\Users\Hung\Documents\Selenium\MangaTranslator\Translation_backup")
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup_path = backup_dir / f"{_base_name}_translation.txt"
+                    with open(backup_path, "w", encoding="utf-8") as f:
+                        f.write(manual_txt_val.strip())
+                except Exception:
+                    pass
+        else:
+            backend_config.translation.manual_translation_text = ""
         selected_font_pack_name = ui_state.font_pack
 
         result_image, save_path = logic.translate_manga_logic(
@@ -860,25 +970,38 @@ def handle_translate_click(
             processing_time,
         )
 
-        return result_image.copy(), _status_update(status_msg)
+        # Clean up the temp working txt file in output/
+        return result_image.copy(), _status_update(status_msg), gr.update()
 
     except gr.Error as e:
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        return None, _status_update(cleaned), gr.update()
     except CancellationError:
-        return None, _status_update("Translation cancelled by user.")
+        return None, _status_update("Translation cancelled by user."), gr.update()
     except (ValidationError, FileNotFoundError, ValueError, logic.LogicError) as e:
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        
+        # Check if error is related to TranslationError of manual txt
+        txt_content = gr.update()
+        if "--- CONTENT START ---" in cleaned:
+            import re
+            m = re.search(r"--- CONTENT START ---\n(.*?)\n--- CONTENT END ---", cleaned, re.DOTALL)
+            if m:
+                _txt_content_str = m.group(1).strip()
+                txt_content = gr.update(value=_txt_content_str)
+                # Simplify status message to be clean and user friendly
+                cleaned = "Đã sinh bản dịch mẫu. Hãy sửa nội dung sau dấu '||' rồi bấm Translate lại để vẽ lên ảnh."
+                
+        return None, _status_update(cleaned), txt_content
     except Exception as e:
         import traceback
 
         traceback.print_exc()
         cleaned = _clean_error_message(f"An unexpected error occurred: {str(e)}")
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        return None, _status_update(cleaned), gr.update()
 
 
 def handle_zip_or_failed_paths_upload(
@@ -959,9 +1082,19 @@ def handle_batch_click(
         else:
             input_to_process = input_files
 
-        ui_state = _build_ui_state_from_args(args[2:], is_batch=True)
+        batch_manual_txt_val = args[-1]
+        ui_args = args[:-1]
+        ui_state = _build_ui_state_from_args(ui_args[2:], is_batch=True)
 
         _validate_ui_state(ui_state)
+
+        # Auto-save batch special instructions to settings
+        try:
+            settings = settings_manager.get_saved_settings()
+            settings["batch_special_instructions"] = ui_state.llm_settings.special_instructions
+            settings_manager.save_config(settings)
+        except Exception:
+            pass
 
         backend_config = map_ui_to_backend_config(
             ui_state=ui_state,
@@ -971,19 +1104,91 @@ def handle_batch_click(
         )
         selected_font_pack_name = ui_state.batch_font_pack
 
-        results = logic.process_batch_logic(
-            input_dir_or_files=input_to_process,
-            config=backend_config,
-            selected_font_pack_name=selected_font_pack_name,
-            models_dir=models_dir,
-            fonts_base_dir=fonts_base_dir,
-            gradio_progress=progress,
-            cancellation_manager=CANCELLATION_MANAGER,
-        )
+        parsed_batch_translations: Optional[Dict[str, str]] = None
+        if batch_manual_txt_val and isinstance(batch_manual_txt_val, str) and batch_manual_txt_val.strip() and backend_config.translation.manual_json_translation:
+            parsed_batch_translations = {}
+            current_filename = None
+            current_lines = []
+            for line in batch_manual_txt_val.splitlines():
+                line_str = line.strip()
+                m = re.match(r"^(.+?\.(?:png|jpg|jpeg|webp)):$", line_str, re.IGNORECASE)
+                if m:
+                    if current_filename and current_lines:
+                        parsed_batch_translations[current_filename] = "\n".join(current_lines).strip()
+                    current_filename = Path(m.group(1).strip()).name
+                    current_lines = []
+                else:
+                    if current_filename is not None:
+                        current_lines.append(line)
+            if current_filename and current_lines:
+                parsed_batch_translations[current_filename] = "\n".join(current_lines).strip()
 
-        output_path = results["output_path"]
+            if parsed_batch_translations:
+                try:
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    backup_dir = Path(r"C:\Users\Hung\Documents\Selenium\MangaTranslator\Translation_backup")
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup_path = backup_dir / f"batch_translation_{timestamp}.txt"
+                    with open(backup_path, "w", encoding="utf-8") as f:
+                        f.write(batch_manual_txt_val.strip())
+                except Exception:
+                    pass
+
+        import queue
+        import threading
+
+        template_queue = queue.Queue()
+        def _on_template_ready(fname: str, template_str: str):
+            template_queue.put((fname, template_str))
+
+        batch_thread_exception = []
+        results = {}
+
+        def _run_batch_worker():
+            try:
+                res = logic.process_batch_logic(
+                    input_dir_or_files=input_to_process,
+                    config=backend_config,
+                    selected_font_pack_name=selected_font_pack_name,
+                    models_dir=models_dir,
+                    fonts_base_dir=fonts_base_dir,
+                    gradio_progress=progress,
+                    cancellation_manager=CANCELLATION_MANAGER,
+                    batch_manual_translations=parsed_batch_translations,
+                    on_template_ready=_on_template_ready,
+                )
+                results.update(res)
+            except Exception as ex:
+                batch_thread_exception.append(ex)
+
+        t = threading.Thread(target=_run_batch_worker)
+        t.start()
+
+        collected_blocks = []
+        seen_filenames = set()
+
+        while t.is_alive() or not template_queue.empty():
+            got_new = False
+            while not template_queue.empty():
+                fname, template_str = template_queue.get_nowait()
+                if fname not in seen_filenames:
+                    seen_filenames.add(fname)
+                    collected_blocks.append(f"{fname}:\n\n{template_str}")
+                    got_new = True
+            
+            if got_new and backend_config.translation.manual_json_translation and not parsed_batch_translations:
+                yield [], _status_update("Đã sinh bản dịch mẫu cho một số ảnh trong batch..."), gr.update(value="\n\n".join(collected_blocks))
+            
+            time.sleep(0.15)
+
+        t.join()
+
+        if batch_thread_exception:
+            raise batch_thread_exception[0]
+
+        output_path = results.get("output_path")
         gallery_images = []
-        if output_path.exists():
+        if output_path and output_path.exists():
             # Use rglob to recursively find all images when structure is preserved
             processed_files = list(output_path.rglob("*.*"))
             image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
@@ -1000,6 +1205,23 @@ def handle_batch_click(
             )
             gallery_images = [str(file_path) for file_path in processed_files]
 
+        # Collect any remaining Lần 1 manual templates if present
+        batch_txt_update = gr.update()
+        if backend_config.translation.manual_json_translation and not parsed_batch_translations:
+            errors_dict = results.get("errors", {})
+            for err_key, err_val in errors_dict.items():
+                if "--- CONTENT START ---" in str(err_val):
+                    m_str = re.search(r"--- CONTENT START ---\n(.*?)\n--- CONTENT END ---", str(err_val), re.DOTALL)
+                    if m_str:
+                        template_str = m_str.group(1).strip()
+                        filename = Path(err_key).name
+                        if filename not in seen_filenames:
+                            seen_filenames.add(filename)
+                            collected_blocks.append(f"{filename}:\n\n{template_str}")
+            
+            if collected_blocks:
+                batch_txt_update = gr.update(value="\n\n".join(collected_blocks))
+
         # Re-get font path for success message (logic already validated it)
         font_dir_path = (
             fonts_base_dir / selected_font_pack_name
@@ -1010,22 +1232,25 @@ def handle_batch_click(
         status_msg = _format_batch_success_message(
             results, backend_config, font_dir_path
         )
+        if backend_config.translation.manual_json_translation and not parsed_batch_translations and collected_blocks:
+            status_msg = "Đã sinh bản dịch mẫu cho các ảnh trong batch. Hãy chỉnh sửa nội dung trong 'Batch Manual Translation Box' rồi bấm Start Batch Translating lại để vẽ lên ảnh."
+            
         progress(1.0, desc="Batch complete!")
-        return gallery_images, _status_update(status_msg)
+        yield gallery_images, _status_update(status_msg), batch_txt_update
 
     except gr.Error as e:
         progress(1.0, desc="Error occurred")
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        return None, _status_update(cleaned), gr.update()
     except CancellationError:
         progress(1.0, desc="Cancelled")
-        return None, _status_update("Batch process cancelled by user.")
+        return None, _status_update("Batch process cancelled by user."), gr.update()
     except (ValidationError, FileNotFoundError, ValueError, logic.LogicError) as e:
         progress(1.0, desc="Error occurred")
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        return None, _status_update(cleaned), gr.update()
     except Exception as e:
         progress(1.0, desc="Error occurred")
         import traceback
@@ -1035,7 +1260,7 @@ def handle_batch_click(
             f"An unexpected error occurred during batch processing: {str(e)}"
         )
         gr.Error(cleaned)
-        return None, _status_update(cleaned)
+        return None, _status_update(cleaned), gr.update()
 
 
 def handle_save_config_click(*args: Any) -> str:
@@ -1117,6 +1342,8 @@ def handle_save_config_click(*args: Any) -> str:
         auto_vertical_text_val,
         vertical_line_spacing_mult_val,
         vertical_font_size_mult_val,
+        auto_rotate_text_val,
+        auto_rotate_confidence_threshold_val,
         special_instructions_val,
         batch_special_instructions_val,
         hyphen_penalty_val,
@@ -1128,6 +1355,8 @@ def handle_save_config_click(*args: Any) -> str:
         outside_text_seed_val,
         outside_text_inpainting_method_val,
         outside_text_flux_backend_val,
+        outside_text_cloudflare_accounts_val,
+        outside_text_colab_server_url_val,
         outside_text_flux_low_vram_val,
         outside_text_flux_sdcpp_cache_mode_val,
         outside_text_flux_sdcpp_diffusion_quant_val,
@@ -1174,6 +1403,7 @@ def handle_save_config_click(*args: Any) -> str:
         batch_retry_failed_once_val,
         batch_previous_context_image_count_val,
         batch_previous_context_text_count_val,
+        manual_json_translation_val,
     ) = args
     ui_state = UIConfigState(
         detection=UIDetectionSettings(
@@ -1198,6 +1428,8 @@ def handle_save_config_click(*args: Any) -> str:
             huggingface_token=outside_text_huggingface_token_val,
             inpainting_method=outside_text_inpainting_method_val,
             flux_backend=outside_text_flux_backend_val,
+            cloudflare_accounts=outside_text_cloudflare_accounts_val,
+            colab_server_url=outside_text_colab_server_url_val,
             flux_low_vram=outside_text_flux_low_vram_val,
             flux_sdcpp_cache_mode=outside_text_flux_sdcpp_cache_mode_val,
             flux_sdcpp_diffusion_quant=outside_text_flux_sdcpp_diffusion_quant_val,
@@ -1274,6 +1506,7 @@ def handle_save_config_click(*args: Any) -> str:
             openrouter_api_key=or_key,
             openai_compatible_url=comp_url,
             openai_compatible_api_key=comp_key,
+            manual_json_translation=manual_json_translation_val,
         ),
         llm_settings=UITranslationLLMSettings(
             model_name=model,
@@ -1304,6 +1537,8 @@ def handle_save_config_click(*args: Any) -> str:
             auto_vertical_text=auto_vertical_text_val,
             vertical_line_spacing_mult=float(vertical_line_spacing_mult_val),
             vertical_font_size_mult=float(vertical_font_size_mult_val),
+            auto_rotate_text=bool(auto_rotate_text_val),
+            auto_rotate_confidence_threshold=float(auto_rotate_confidence_threshold_val),
             hyphen_penalty=hyphen_penalty_val,
             hyphenation_min_word_length=hyphenation_min_word_length_val,
             badness_exponent=badness_exponent_val,
@@ -1645,6 +1880,13 @@ def handle_reset_defaults_click(fonts_base_dir: Path) -> List[gr.update]:
         gr.update(value=default_ui_state.rendering.auto_vertical_text),
         default_ui_state.rendering.vertical_line_spacing_mult,
         default_ui_state.rendering.vertical_font_size_mult,
+        gr.update(value=getattr(default_ui_state.rendering, "auto_rotate_text", True)),
+        gr.update(
+            value=getattr(
+                default_ui_state.rendering, "auto_rotate_confidence_threshold", 0.5
+            ),
+            visible=getattr(default_ui_state.rendering, "auto_rotate_text", True),
+        ),
         gr.update(
             value=default_ui_state.rendering.hyphen_penalty,
             interactive=text_layout_flags["hyphen_penalty"],
@@ -1657,7 +1899,12 @@ def handle_reset_defaults_click(fonts_base_dir: Path) -> List[gr.update]:
         default_ui_state.batch_special_instructions or "",
         default_ui_state.outside_text.enabled,
         default_ui_state.outside_text.seed,
-        gr.update(value=default_ui_state.outside_text.inpainting_method),
+        gr.update(
+            value=default_ui_state.outside_text.inpainting_method,
+            choices=_inpainting_method_choices(
+                default_ui_state.outside_text.flux_backend
+            ),
+        ),
         gr.update(
             value=default_ui_state.outside_text.flux_backend,
             choices=_flux_backend_choices(
@@ -1665,6 +1912,8 @@ def handle_reset_defaults_click(fonts_base_dir: Path) -> List[gr.update]:
             ),
         ),
         default_ui_state.outside_text.flux_backend,
+        gr.update(value=default_ui_state.outside_text.cloudflare_accounts),
+        gr.update(value=default_ui_state.outside_text.colab_server_url),
         default_ui_state.outside_text.flux_low_vram,
         default_ui_state.outside_text.flux_sdcpp_cache_mode,
         gr.update(
@@ -2498,3 +2747,344 @@ def handle_translation_mode_change(translation_mode: str, current_ocr_method: st
             return gr.update(interactive=False)
     else:
         return gr.update(interactive=True)
+
+
+def handle_input_image_change(image_path: Any) -> Any:
+    """Loads existing translation file if it exists, otherwise clears the textbox."""
+    import gradio as gr
+    from pathlib import Path
+    if not image_path or not isinstance(image_path, (str, Path)):
+        return gr.update(value="")
+    try:
+        _json_base = Path(image_path)
+        _base_name = _json_base.name.split('_translated_')[0] if '_translated_' in _json_base.name else _json_base.stem
+        _txt_path = Path("./output") / f"{_base_name}_translation.txt"
+        if _txt_path.exists():
+            with open(_txt_path, "r", encoding="utf-8") as f:
+                return gr.update(value=f.read())
+    except Exception:
+        pass
+    return gr.update(value="")
+
+
+# --- Batch Interactive Gemini Chat Handlers ---
+from core.services.gemini_session_manager import GeminiChatSession, AVAILABLE_CHAT_MODELS
+from core.services.batch_translation_parser import (
+    parse_chat_response_to_batch_manual,
+    parse_and_validate_batch_manual,
+    extract_file_names_from_batch_manual,
+    extract_ocr_blocks_for_files,
+    find_problematic_lines,
+)
+import os
+
+BATCH_GEMINI_SESSION: Optional[GeminiChatSession] = None
+
+
+def get_batch_gemini_session() -> GeminiChatSession:
+    global BATCH_GEMINI_SESSION
+    settings = settings_manager.get_saved_settings()
+    api_key = (
+        settings.get("google_api_key")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or ""
+    )
+    if not BATCH_GEMINI_SESSION:
+        BATCH_GEMINI_SESSION = GeminiChatSession(fallback_api_key=api_key)
+    else:
+        BATCH_GEMINI_SESSION.reload_keys(fallback_key=api_key)
+    return BATCH_GEMINI_SESSION
+
+
+def handle_batch_chat_model_change(selected_model: str):
+    session = get_batch_gemini_session()
+    session.set_model(selected_model)
+    return f"**Model đã chọn:** `{selected_model}`"
+
+
+def handle_batch_chat_cancel(current_history: List[Any]):
+    session = get_batch_gemini_session()
+    next_key = session.cancel_and_rotate_key()
+    key_info = f" Đã chuyển sang {next_key}." if next_key else ""
+    status_msg = f"⚠️ Đã hủy yêu cầu trên `{session.current_model}`.{key_info} Bạn có thể gửi lại hoặc thao tác tiếp."
+
+    hist = list(current_history or [])
+    if hist and isinstance(hist[-1], (list, tuple)) and len(hist[-1]) > 1:
+        last_bot_msg = str(hist[-1][1] or "")
+        if "⏳" in last_bot_msg or not last_bot_msg:
+            hist[-1] = (hist[-1][0], "⚠️ *(Đã hủy yêu cầu)*")
+    return hist, status_msg
+
+
+def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected_model: str):
+    session = get_batch_gemini_session()
+    if selected_model:
+        session.set_model(selected_model)
+
+    if not session.has_keys:
+        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        hist = list(current_history or [])
+        hist.append(("Nạp OCR", error_msg))
+        yield hist, "**Lỗi:** Thiếu API Key"
+        return
+
+    txt_content = (manual_txt or "").strip()
+    if not txt_content:
+        error_msg = "⚠️ Hộp dịch thủ công Batch hiện đang trống! Hãy nạp file hoặc chạy trích xuất OCR trước."
+        hist = list(current_history or [])
+        hist.append(("Nạp OCR", error_msg))
+        yield hist, "**Cảnh báo:** Hộp dịch Batch trống"
+        return
+
+    session.reset()
+    user_prompt = (
+        "Dưới đây là toàn bộ văn bản OCR của tập truyện theo từng file ảnh:\n\n"
+        f"{txt_content}\n\n"
+        "Hãy đọc toàn bộ câu thoại, phân tích bối cảnh câu chuyện, nhận diện nhân vật, mối quan hệ và đề xuất Bảng quy ước xưng hô phù hợp cho truyện 18+. "
+        "Chưa cần dịch vội, hãy tóm tắt và chờ tôi xác nhận hoặc yêu cầu dịch từng cụm trang cụ thể."
+    )
+
+    init_prompt_label = "📤 Nạp toàn bộ dữ liệu OCR vào AI phân tích"
+    # Hiển thị ngay lập tức tin nhắn của user và trạng thái đang xử lý
+    yield [(init_prompt_label, "⏳ Đang phân tích ngữ cảnh và thiết lập bảng xưng hô...")], f"⏳ Đang gửi yêu cầu tới `{session.current_model}`..."
+
+    try:
+        status_info, current_model, model_text = session.send_message(user_prompt)
+        yield [(init_prompt_label, model_text)], f"**Model:** `{current_model}` | {status_info}"
+    except Exception as e:
+        yield [(init_prompt_label, f"❌ Lỗi: {str(e)}")], f"**Lỗi:** {str(e)}"
+
+
+def handle_batch_chat_send(user_msg: str, current_history: List[Any], selected_model: str):
+    msg = (user_msg or "").strip()
+    if not msg:
+        yield current_history or [], "", "**Chưa nhập tin nhắn**"
+        return
+
+    session = get_batch_gemini_session()
+    if selected_model:
+        session.set_model(selected_model)
+
+    hist = list(current_history or [])
+    if not session.has_keys:
+        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        hist.append((msg, error_msg))
+        yield hist, "", "**Lỗi:** Thiếu API Key"
+        return
+
+    # Lượt 1: Hiện ngay tin nhắn người dùng và làm sạch ô nhập liệu
+    hist.append([msg, "⏳ Đang suy nghĩ..."])
+    yield hist, "", f"⏳ Đang gửi yêu cầu tới `{session.current_model}`..."
+
+    # Lượt 2: Gọi LLM và cập nhật câu trả lời khi có kết quả
+    try:
+        status_info, current_model, model_text = session.send_message(msg)
+        hist[-1] = [msg, model_text]
+        yield hist, "", f"**Model:** `{current_model}` | {status_info}"
+    except Exception as e:
+        hist[-1] = [msg, f"❌ Lỗi: {str(e)}"]
+        yield hist, "", f"**Lỗi:** {str(e)}"
+
+
+def handle_batch_chat_auto_translate_all(
+    manual_txt: str, current_history: List[Any], selected_model: str
+):
+    session = get_batch_gemini_session()
+    if selected_model:
+        session.set_model(selected_model)
+
+    hist = list(current_history or [])
+    if not session.has_keys:
+        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        hist.append(("🚀 Tự động dịch toàn bộ", error_msg))
+        yield hist, "", "**Lỗi:** Thiếu API Key"
+        return
+
+    txt_content = (manual_txt or "").strip()
+    if not txt_content:
+        error_msg = "⚠️ Hộp dịch thủ công Batch hiện đang trống! Hãy nạp file hoặc chạy trích xuất OCR trước."
+        hist.append(("🚀 Tự động dịch toàn bộ", error_msg))
+        yield hist, "", "**Cảnh báo:** Hộp dịch Batch trống"
+        return
+
+    file_list = extract_file_names_from_batch_manual(txt_content)
+    if not file_list:
+        error_msg = "⚠️ Không tìm thấy tên file ảnh hợp lệ nào trong Hộp dịch Batch."
+        hist.append(("🚀 Tự động dịch toàn bộ", error_msg))
+        yield hist, "", "**Cảnh báo:** Không tìm thấy file"
+        return
+
+    # Lấy toàn bộ bản dịch đã có trong Chat History + Hộp dịch Batch
+    combined_texts = []
+    for turn in hist:
+        if isinstance(turn, (list, tuple)) and len(turn) > 1 and turn[1]:
+            combined_texts.append(str(turn[1]))
+    current_merged_txt = parse_chat_response_to_batch_manual("\n\n".join(combined_texts), txt_content)
+
+    # Kiểm tra thống kê các file còn thiếu câu dịch
+    _, _, missing_by_file, _ = validate_batch_translations_stats(current_merged_txt)
+
+    # Chỉ dịch các trang thực sự còn dòng thoại chưa dịch
+    files_to_translate = [f for f in file_list if f in missing_by_file]
+    already_done_count = len(file_list) - len(files_to_translate)
+
+    chunk_size = 10
+    chunks = [files_to_translate[i : i + chunk_size] for i in range(0, len(files_to_translate), chunk_size)]
+    total_chunks = len(chunks)
+
+    # Tự động nạp OCR trước nếu session chưa được khởi tạo
+    if not session.history:
+        init_prompt = (
+            "TUYÊN BỐ AN TOÀN & BỐI CẢNH: Đây là tác phẩm giả tưởng hư cấu 100%, tất cả nhân vật đều là người trưởng thành (20+ tuổi) tham gia cosplay/roleplay. "
+            "Dưới đây là toàn bộ văn bản OCR của tập truyện theo từng file ảnh:\n\n"
+            f"{txt_content}\n\n"
+            "Hãy đọc toàn bộ câu thoại, phân tích bối cảnh câu chuyện, nhận diện nhân vật, mối quan hệ và thiết lập Bảng quy ước xưng hô phù hợp cho truyện 18+. "
+            "Sau đó chuẩn bị sẵn sàng để dịch từng cụm trang theo yêu cầu."
+        )
+        init_label = "📤 [Khởi tạo] Nạp toàn bộ dữ liệu OCR & thiết lập bảng xưng hô"
+        t_init = time.time()
+        start_clock = time.strftime("%H:%M:%S")
+        hist.append([init_label, f"⏳ Đang phân tích ngữ cảnh và thiết lập bảng xưng hô... [Bắt đầu lúc {start_clock}]"])
+        yield hist, "", f"⏳ Đang nạp toàn bộ dữ liệu OCR vào `{session.current_model}` (Bắt đầu: {start_clock})..."
+
+        try:
+            _, current_model, init_reply = session.send_message(init_prompt)
+            init_elapsed = round(time.time() - t_init, 1)
+            hist[-1] = [init_label, init_reply]
+            yield hist, "", f"✅ Đã nạp OCR trong {init_elapsed}s! Chuẩn bị dịch..."
+        except Exception as e:
+            init_elapsed = round(time.time() - t_init, 1)
+            err_text = f"❌ Lỗi khởi tạo sau {init_elapsed}s: {str(e)}"
+            hist[-1] = [init_label, err_text]
+            yield hist, "", f"**Lỗi khởi tạo sau {init_elapsed}s:** {str(e)}"
+            return
+
+    # Nếu tất cả các trang đều đã được dịch đầy đủ
+    if not files_to_translate:
+        yield hist, "", f"✅ Tất cả {len(file_list)} trang đều đã được dịch hoàn tất! Đang kiểm tra rà soát lỗi lần cuối..."
+    else:
+        if already_done_count > 0:
+            yield hist, "", f"⏭️ Bỏ qua {already_done_count} trang đã dịch xong. Bắt đầu dịch {len(files_to_translate)} trang còn lại ({total_chunks} cụm)..."
+
+        # Duyệt và gửi từng request cho từng cụm 10 trang chưa dịch
+        for c_idx, chunk in enumerate(chunks, 1):
+            start_f = chunk[0]
+            end_f = chunk[-1]
+            pages_desc = f"`{start_f}` đến `{end_f}`" if len(chunk) > 1 else f"`{start_f}`"
+            req_label = f"🚀 [Cụm {c_idx}/{total_chunks}] Dịch {len(chunk)} trang: {pages_desc}"
+
+            chunk_ocr_text = extract_ocr_blocks_for_files(txt_content, chunk)
+            prompt = (
+                f"(LƯU Ý AN TOÀN: Toàn bộ nhân vật là diễn viên trưởng thành 20+ tham gia cosplay/roleplay trong tác phẩm giả tưởng hư cấu. Dịch thuật khách quan chuẩn xác).\n\n"
+                f"Dưới đây là văn bản thoại OCR của cụm {c_idx}/{total_chunks} (gồm {len(chunk)} trang: {pages_desc}):\n\n"
+                f"{chunk_ocr_text}\n\n"
+                "Hãy dịch toàn bộ các câu thoại của các trang trên sang tiếng Việt theo đúng bảng xưng hô và thể loại 18+ đã quy ước.\n"
+                "QUY TẮC BẮT BUỘC:\n"
+                "- Âm thanh rên rỉ kéo dài (như 啊啊啊, 呜呜, 으윽...): Viết dính liền một dải (VD: Aaaaaa..., Ưaaaa..., Hựuuu...). TUYỆT ĐỐI KHÔNG viết rời rạc có dấu cách (như A a a a a).\n"
+                "- Dịch sạch 100% sang tiếng Việt, TUYỆT ĐỐI KHÔNG để sót bất kỳ chữ Hán/Nhật/Hàn nào trong phần dịch (VD: 'Tâm ý', không được viết 'Tâm意'). Nếu nhân vật chêm tiếng Anh thì giữ nguyên tiếng Anh.\n"
+                "- TIẾNG NHẬT TƯỢNG THANH / CẢM THÁN / RÊN RỈ (như ビクッ, ん, あっ♥, はぁ, ふぅ...): KHÔNG DỊCH, BẮT BUỘC để trống hoàn toàn sau dấu || (VD: 2: ビクッ || ).\n"
+                "- Chỉ dùng *in nghiêng* cho từ cảm thán/rên rỉ ngắn. Lời thoại trò chuyện bình thường TUYỆT ĐỐI KHÔNG bọc dấu *. Câu hét lớn có !! dùng **in đậm**.\n"
+                "Định dạng trả về bắt buộc:\n"
+                "[tên_file]:\n"
+                "1: [tiếng gốc] || [bản dịch]\n"
+                "2: [tiếng gốc] || [bản dịch]\n\n"
+                "Chỉ trả về các dòng dịch theo đúng cấu trúc trên cho tất cả các trang trong cụm này, không thêm lời giải thích thừa."
+            )
+
+            t_chunk = time.time()
+            clock_chunk = time.strftime("%H:%M:%S")
+            hist.append([req_label, f"⏳ Đang dịch cụm {c_idx}/{total_chunks} ({pages_desc})... [Bắt đầu lúc {clock_chunk}]"])
+            yield hist, "", f"⏳ Đang dịch cụm {c_idx}/{total_chunks} ({pages_desc}) trên `{session.current_model}` (Bắt đầu: {clock_chunk})..."
+
+            try:
+                status_info, current_model, model_text = session.send_message(prompt)
+                chunk_elapsed = round(time.time() - t_chunk, 1)
+                hist[-1] = [req_label, model_text]
+                yield hist, "", f"✅ Xong cụm {c_idx}/{total_chunks} ({pages_desc}) trong {chunk_elapsed}s. Model: `{current_model}` | {status_info}"
+            except Exception as e:
+                chunk_elapsed = round(time.time() - t_chunk, 1)
+                err_msg = f"❌ Lỗi tại cụm {c_idx}/{total_chunks} ({pages_desc}) sau {chunk_elapsed}s: {str(e)}"
+                hist[-1] = [req_label, err_msg]
+                yield hist, "", f"**{err_msg}**"
+                return
+
+    # Tự động rà soát và sửa lỗi (Auto-Fix Request) nếu phát hiện lỗi sót chữ Hán/Hàn hoặc thiếu dòng
+    combined_texts = []
+    for turn in hist:
+        if isinstance(turn, (list, tuple)) and len(turn) > 1 and turn[1]:
+            combined_texts.append(str(turn[1]))
+    current_merged_txt = parse_chat_response_to_batch_manual("\n\n".join(combined_texts), txt_content)
+    problems = find_problematic_lines(current_merged_txt)
+
+    if problems:
+        problem_count = len(problems)
+        auto_fix_items = problems[:20]  # Giới hạn tối đa 20 câu lỗi mỗi đợt để phản hồi tức thì
+        lines_to_fix = [f"{item['file']}: {item['idx']}: {item['orig']}" for item in auto_fix_items]
+
+        fix_req_label = f"🔍 [Tự động rà soát] Phát hiện {problem_count} câu bị sót chữ Hán/Hàn hoặc chưa dịch"
+        fix_prompt = (
+            "Dưới đây là các câu thoại bị sót chữ Hán/Hàn hoặc chưa được dịch hoàn chỉnh:\n\n"
+            + "\n".join(lines_to_fix) + "\n\n"
+            "Hãy dịch lại hoàn toàn sạch sẽ sang tiếng Việt cho các câu trên.\n"
+            "QUY TẮC QUAN TRỌNG:\n"
+            "- BẮT BUỘC dịch sạch 100% chữ Hán/Nhật/Hàn, không để sót chữ nào, tuân thủ đúng bảng xưng hô, tiếng rên kéo dài viết dính liền.\n"
+            "- TUYỆT ĐỐI BỎ QUA từ tượng thanh / cảm thán / rên rỉ tiếng Nhật (như ビクッ, ん, あっ, はぁ...), để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
+            "- Quy tắc font: chỉ dùng *in nghiêng* cho tiếng rên ngắn, không bọc * cả câu dài. Nếu có tiếng Anh thì giữ nguyên tiếng Anh.\n\n"
+            "Định dạng trả về bắt buộc:\n"
+            "[tên_file]:\n"
+            "[số_dòng]: [tiếng gốc] || [bản dịch]\n\n"
+            "Chỉ trả về các dòng sửa trên, không thêm lời giải thích thừa."
+        )
+
+        t_fix = time.time()
+        clock_fix = time.strftime("%H:%M:%S")
+        hist.append([fix_req_label, f"⏳ Đang tự động gửi AI sửa triệt để {len(auto_fix_items)} câu lỗi... [Bắt đầu lúc {clock_fix}]"])
+        yield hist, "", f"⏳ Đang tự động sửa {len(auto_fix_items)} câu lỗi trên `{session.current_model}` (Bắt đầu: {clock_fix})..."
+
+        try:
+            status_info, current_model, fix_model_text = session.send_message(fix_prompt)
+            fix_elapsed = round(time.time() - t_fix, 1)
+            hist[-1] = [fix_req_label, fix_model_text]
+            yield hist, "", f"✅ Đã tự động sửa xong {len(auto_fix_items)} câu lỗi trong {fix_elapsed}s. Model: `{current_model}` | {status_info}"
+        except Exception as e:
+            fix_elapsed = round(time.time() - t_fix, 1)
+            hist[-1] = [fix_req_label, f"⚠️ Rà soát lỗi gặp sự cố sau {fix_elapsed}s: {str(e)}"]
+
+    yield hist, "", f"🎉 Đã hoàn tất tự động dịch toàn bộ {len(file_list)} trang và rà soát sạch lỗi! Bấm 'Điền kết quả vào Hộp Dịch' để áp dụng."
+
+
+def handle_batch_chat_quick_check_role(current_history: List[Any], selected_model: str):
+    prompt = (
+        "Hãy kiểm tra và tóm tắt lại bảng quy ước xưng hô của các nhân vật đã xuất hiện trong truyện (Ai xưng gì với ai). "
+        "Đánh giá xem các đoạn thoại vừa dịch có câu nào bị xưng hô nhầm ngôi hoặc không tự nhiên không?"
+    )
+    yield from handle_batch_chat_send(prompt, current_history, selected_model)
+
+
+def handle_batch_chat_apply(current_history: List[Any], current_manual_txt: str):
+    if not current_history:
+        return current_manual_txt or "", "⚠️ Chưa có cuộc hội thoại nào để áp dụng kết quả."
+
+    combined_model_text = []
+    for turn in current_history:
+        if isinstance(turn, (list, tuple)) and len(turn) > 1 and turn[1]:
+            combined_model_text.append(str(turn[1]))
+
+    all_ai_text = "\n\n".join(combined_model_text)
+    updated_txt, status_md = parse_and_validate_batch_manual(
+        all_ai_text, current_manual_txt or ""
+    )
+    return updated_txt, status_md
+
+
+def handle_batch_chat_reset(selected_model: str):
+    global BATCH_GEMINI_SESSION
+    if BATCH_GEMINI_SESSION:
+        BATCH_GEMINI_SESSION.reset()
+        if selected_model:
+            BATCH_GEMINI_SESSION.set_model(selected_model)
+    model = selected_model or "gemini-3.8-flash"
+    return [], f"**Model đã chọn:** `{model}` (Đã đặt lại Session)"
+
+

@@ -15,26 +15,33 @@ from .image_utils import (
     calculate_centroid_expansion_box,
     convert_image_to_target_mode,
     cv2_to_pil,
+    estimate_mask_rotation_angle,
     pil_to_cv2,
     process_bubble_image_cached,
     resize_to_max_side,
     save_image_with_compression,
+    unrotate_mask,
     upscale_image,
     upscale_image_to_dimension,
 )
 from .inpainting import FluxKontextInpainter
 from .ocr_detection import OutsideTextDetector
+from .tilt_detection import compute_effective_tilt_angle, detect_crop_tilt_angle
 
 __all__ = [
     "clean_speech_bubbles",
     "detect_speech_bubbles",
     "calculate_centroid_expansion_box",
+    "compute_effective_tilt_angle",
     "convert_image_to_target_mode",
     "cv2_to_pil",
+    "detect_crop_tilt_angle",
+    "estimate_mask_rotation_angle",
     "pil_to_cv2",
     "process_bubble_image_cached",
     "resize_to_max_side",
     "save_image_with_compression",
+    "unrotate_mask",
     "upscale_image",
     "upscale_image_to_dimension",
     "FluxKontextInpainter",

@@ -355,10 +355,18 @@ class OutsideTextDetector:
                         elif cname == "text_free":
                             tf_id = cid
 
+                sec_confs = (
+                    sec_results.boxes.conf
+                    if sec_results.boxes is not None
+                    else torch.tensor([])
+                )
                 if tf_id is not None and len(sec_boxes) > 0:
                     for i, cls_id in enumerate(sec_cls):
                         if int(cls_id) == tf_id:
-                            text_free_boxes.append(sec_boxes[i].detach().cpu().numpy())
+                            box_arr = sec_boxes[i].detach().cpu().numpy().tolist()
+                            if len(sec_confs) > i:
+                                box_arr.append(float(sec_confs[i].detach().cpu().item()))
+                            text_free_boxes.append(box_arr)
 
                 if bubble_id is not None and len(sec_boxes) > 0:
                     boxes_to_add = []
@@ -394,11 +402,13 @@ class OutsideTextDetector:
                     f"Using {len(text_free_boxes)} text_free boxes as OSB detections",
                     always_print=True,
                 )
+                tf_coords = [b[:4] for b in text_free_boxes]
+                tf_confs = [b[4] if len(b) >= 5 else 1.0 for b in text_free_boxes]
                 osbtext_boxes = torch.tensor(
-                    text_free_boxes, device=self.device, dtype=torch.float32
+                    tf_coords, device=self.device, dtype=torch.float32
                 )
-                osbtext_confs = torch.ones(
-                    len(text_free_boxes), device=self.device, dtype=torch.float32
+                osbtext_confs = torch.tensor(
+                    tf_confs, device=self.device, dtype=torch.float32
                 )
             else:
                 log_message(
@@ -453,11 +463,13 @@ class OutsideTextDetector:
                         f"Using {len(text_free_boxes)} text_free boxes as OSB fallback",
                         always_print=True,
                     )
+                    tf_coords = [b[:4] for b in text_free_boxes]
+                    tf_confs = [b[4] if len(b) >= 5 else 1.0 for b in text_free_boxes]
                     osbtext_boxes = torch.tensor(
-                        text_free_boxes, device=self.device, dtype=torch.float32
+                        tf_coords, device=self.device, dtype=torch.float32
                     )
-                    osbtext_confs = torch.ones(
-                        len(text_free_boxes), device=self.device, dtype=torch.float32
+                    osbtext_confs = torch.tensor(
+                        tf_confs, device=self.device, dtype=torch.float32
                     )
                 else:
                     log_message(
@@ -472,7 +484,8 @@ class OutsideTextDetector:
 
             for i, box in enumerate(boxes_np):
                 conf = confs_np[i]
-                base_results.append((box, float(conf)))
+                if conf >= confidence:
+                    base_results.append((box, float(conf)))
 
         final_results = list(base_results)
 

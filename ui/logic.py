@@ -4,7 +4,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 from PIL import Image
 
@@ -265,6 +265,8 @@ def process_batch_logic(
     output_base_dir: Path = Path("./output"),
     gradio_progress: Any = None,
     cancellation_manager: Optional["CancellationManager"] = None,
+    batch_manual_translations: Optional[Dict[str, str]] = None,
+    on_template_ready: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """
     Processes a batch of manga images. Handles core validation, calls the core batch pipeline,
@@ -460,6 +462,8 @@ def process_batch_logic(
             preserve_structure=preserve_structure,
             cancellation_manager=cancellation_manager,
             source_path_map=source_path_map or None,
+            batch_manual_translations=batch_manual_translations,
+            on_template_ready=on_template_ready,
         )
 
         processing_time = time.time() - start_time

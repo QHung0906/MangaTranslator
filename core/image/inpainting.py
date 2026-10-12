@@ -1016,31 +1016,37 @@ class FluxKleinInpainter:
         sdcpp_diffusion_quant: str = "",
         sdcpp_text_encoder_quant: str = "",
         verbose: bool = False,
+        cloudflare_accounts: str = "",
+        colab_server_url: str = "",
     ):
         """Initialize the Flux Klein Inpainter.
 
         Args:
-            variant: Model variant - "9b" or "4b" (default: "4b")
+            variant: Model variant - "9b", "4b", "dev", or "sd_inpainting" (default: "4b")
             device: PyTorch device to use. Auto-detects if None.
             huggingface_token: HuggingFace token (required for 9B gated repo).
             num_inference_steps: Number of denoising steps (1-12, default: 4).
             low_vram: If True, use sequential CPU offload for SDNQ.
             luminance_correction: If True, match patch luminance to surrounding context.
             upscale_small_crops: If True, scale small crops to ~1MP before inference.
-            backend: "sdnq" for Diffusers/SDNQ or "sdcpp" for stable-diffusion.cpp.
+            backend: "sdnq" for Diffusers/SDNQ, "sdcpp" for stable-diffusion.cpp, "cloudflare", or "remote_colab".
             sdcpp_cache_mode: sd.cpp cache mode to use when backend is "sdcpp".
             sdcpp_diffusion_quant: Flux sd.cpp diffusion model quant.
             sdcpp_text_encoder_quant: Flux sd.cpp Qwen text encoder quant.
             verbose: Whether to print verbose logging.
+            cloudflare_accounts: Multi-line string of ACCOUNT_ID:API_TOKEN for Cloudflare.
+            colab_server_url: URL to remote Colab server (e.g. https://xxx.trycloudflare.com).
         """
         self.variant = variant.lower()
-        if self.variant not in ("9b", "4b"):
-            raise ValueError(f"Invalid variant '{variant}'. Must be '9b' or '4b'.")
+        if self.variant not in ("9b", "4b", "dev", "sd_inpainting"):
+            raise ValueError(
+                f"Invalid variant '{variant}'. Must be '9b', '4b', 'dev', or 'sd_inpainting'."
+            )
 
         self.backend = backend.lower()
-        if self.backend not in ("sdnq", "sdcpp"):
+        if self.backend not in ("sdnq", "sdcpp", "cloudflare", "remote_colab"):
             raise ValueError(
-                f"Invalid Klein backend '{backend}'. Must be 'sdnq' or 'sdcpp'."
+                f"Invalid backend '{backend}'. Must be 'sdnq', 'sdcpp', 'cloudflare', or 'remote_colab'."
             )
 
         self.num_inference_steps = num_inference_steps
@@ -1048,7 +1054,7 @@ class FluxKleinInpainter:
         self.luminance_correction = luminance_correction
         self.upscale_small_crops = upscale_small_crops
         self.sdcpp_cache_mode = sdcpp_cache_mode
-        _model_key = f"flux_klein_{self.variant}"
+        _model_key = f"flux_klein_{self.variant}" if self.variant in ("4b", "9b") else "flux_klein_4b"
         self.sdcpp_diffusion_quant = sdcpp_diffusion_quant or flux_sdcpp_quant_default(
             _model_key, "diffusion_model"
         )
@@ -1056,6 +1062,23 @@ class FluxKleinInpainter:
             sdcpp_text_encoder_quant or flux_sdcpp_text_encoder_default(_model_key)
         )
         self.verbose = verbose
+        self.cloudflare_accounts = cloudflare_accounts
+        self.cf_client = None
+        if self.backend == "cloudflare":
+            from core.image.cloudflare_client import CloudflareClientManager
+
+            self.cf_client = CloudflareClientManager(
+                accounts_text=cloudflare_accounts, verbose=verbose
+            )
+
+        self.colab_server_url = colab_server_url
+        self.colab_client = None
+        if self.backend == "remote_colab":
+            from core.image.colab_client import ColabClientManager
+
+            self.colab_client = ColabClientManager(
+                server_url=colab_server_url, verbose=verbose
+            )
 
         self.DEVICE = device if device is not None else get_best_device()
         self.DTYPE = get_best_dtype(self.DEVICE)
@@ -1069,6 +1092,9 @@ class FluxKleinInpainter:
 
     def load_models(self):
         """Load Flux Klein models via model manager."""
+        if self.backend in ("cloudflare", "remote_colab"):
+            return
+
         if self.pipeline is not None:
             return
 
@@ -1098,6 +1124,9 @@ class FluxKleinInpainter:
 
     def unload_models(self):
         """Unload Flux.2 Klein models via model manager to free up memory."""
+        if self.backend in ("cloudflare", "remote_colab"):
+            return
+
         self.pipeline = None
         self.sdcpp_assets = None
         self._prompt_embeds_cpu = None
@@ -1545,27 +1574,67 @@ class FluxKleinInpainter:
 
             log_message("  - Running inference...", verbose=verbose)
 
-            with self.manager.flux_inference_lock:
-                self.load_models()
+            if self.backend == "cloudflare":
+                if self.cf_client is None:
+                    raise ModelError("Cloudflare client is not initialized.")
+                mask_pil = Image.fromarray((mask_crop_np.astype(np.uint8) * 255))
+                model_key = (
+                    f"flux_klein_{self.variant}"
+                    if self.variant in ("4b", "9b")
+                    else ("flux_dev" if self.variant == "dev" else "sd_inpainting")
+                )
+                generated_patch_pil = self.cf_client.run_inference(
+                    model_name=model_key,
+                    image_pil=inference_image,
+                    mask_pil=mask_pil,
+                    prompt="clean background, remove text",
+                    width=inference_w,
+                    height=inference_h,
+                    num_inference_steps=self.num_inference_steps,
+                    guidance_scale=self.KLEIN_GUIDANCE_SCALE,
+                )
+            elif self.backend == "remote_colab":
+                if self.colab_client is None:
+                    raise ModelError("Colab client is not initialized.")
+                mask_pil = Image.fromarray((mask_crop_np.astype(np.uint8) * 255))
+                model_key = (
+                    f"flux_klein_{self.variant}"
+                    if self.variant in ("4b", "9b")
+                    else ("flux_dev" if self.variant == "dev" else "sd_inpainting")
+                )
+                generated_patch_pil = self.colab_client.run_inference(
+                    image_pil=inference_image,
+                    mask_pil=mask_pil,
+                    prompt=self.KLEIN_PROMPT,
+                    width=inference_w,
+                    height=inference_h,
+                    num_inference_steps=self.num_inference_steps,
+                    guidance_scale=self.KLEIN_GUIDANCE_SCALE,
+                    seed=seed,
+                    model_name=model_key,
+                )
+            else:
+                with self.manager.flux_inference_lock:
+                    self.load_models()
 
-                if self.pipeline is None:
-                    log_message(
-                        f"Warning: Flux Klein {self.variant.upper()} pipeline unavailable.",
-                        always_print=True,
-                    )
-                    return image_pil
+                    if self.pipeline is None:
+                        log_message(
+                            f"Warning: Flux Klein {self.variant.upper()} pipeline unavailable.",
+                            always_print=True,
+                        )
+                        return image_pil
 
-                if self.backend == "sdcpp":
-                    generated_patch_pil = self._run_sdcpp_inference(
-                        inference_image,
-                        inference_w,
-                        inference_h,
-                        seed,
-                        verbose=verbose or self.verbose,
-                    )
-                else:
-                    with torch.inference_mode():
-                        gen = torch.Generator(device=self.DEVICE).manual_seed(seed)
+                    if self.backend == "sdcpp":
+                        generated_patch_pil = self._run_sdcpp_inference(
+                            inference_image,
+                            inference_w,
+                            inference_h,
+                            seed,
+                            verbose=verbose or self.verbose,
+                        )
+                    else:
+                        with torch.inference_mode():
+                            gen = torch.Generator(device=self.DEVICE).manual_seed(seed)
                         prompt_device = _pipeline_execution_device(
                             self.pipeline, self.DEVICE
                         )

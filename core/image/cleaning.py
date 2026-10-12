@@ -19,8 +19,9 @@ from utils.exceptions import CleaningError, ImageProcessingError, ValidationErro
 from utils.logging import log_message
 
 from .detection import detect_speech_bubbles
-from .image_utils import pil_to_cv2
+from .image_utils import estimate_mask_rotation_angle, pil_to_cv2
 from .inpainting import FluxKleinInpainter, FluxKontextInpainter
+from .tilt_detection import detect_crop_tilt_angle
 
 # Cleaning parameters
 GRAYSCALE_MIDPOINT = 128  # Threshold for determining black vs white bubbles
@@ -550,6 +551,10 @@ def clean_speech_bubbles(
     flux_upscale_small_crops: bool = True,
     bubble_detector_model: str = "yolo_2",
     request_coordinator: Optional[Any] = None,
+    auto_rotate_text: bool = True,
+    auto_rotate_confidence_threshold: float = 0.5,
+    cloudflare_accounts: str = "",
+    colab_server_url: str = "",
 ):
     """
     Clean speech bubbles using YOLO/SAM masks and optional Flux inpainting for colored bubbles.
@@ -833,6 +838,86 @@ def clean_speech_bubbles(
                         continue
 
             if final_mask is not None and fill_color_bgr is not None:
+                rotation_deg = 0.0
+                if auto_rotate_text:
+                    # 1. Primary: Extract text ink strictly inside the bubble interior
+                    try:
+                        bbox = detection.get("bbox")
+                        if bbox is not None:
+                            bx1, by1, bx2, by2 = [int(round(c)) for c in bbox]
+                            bx1, by1 = max(0, bx1), max(0, by1)
+                            bx2, by2 = min(img_width, bx2), min(img_height, by2)
+                            bw, bh = bx2 - bx1, by2 - by1
+                            if bw >= 20 and bh >= 20:
+                                crop_bgr = image[by1:by2, bx1:bx2]
+                                crop_gray = img_gray[by1:by2, bx1:bx2]
+
+                                # Get interior bubble mask
+                                if final_mask is not None:
+                                    int_mask = final_mask[by1:by2, bx1:bx2]
+                                elif base_mask is not None:
+                                    int_mask = base_mask[by1:by2, bx1:bx2]
+                                else:
+                                    _, white_int = cv2.threshold(crop_gray, 180, 255, cv2.THRESH_BINARY)
+                                    cnts, _ = cv2.findContours(white_int, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                    int_mask = np.zeros_like(crop_gray)
+                                    if cnts:
+                                        cv2.drawContours(int_mask, [max(cnts, key=cv2.contourArea)], -1, 255, -1)
+
+                                # Intersect with actual bright pixels inside bubble to exclude black boundary stroke & spikes
+                                white_pixels = (crop_gray > 160).astype(np.uint8) * 255
+                                clean_interior = cv2.bitwise_and(int_mask, white_pixels)
+                                cnts_clean, _ = cv2.findContours(clean_interior, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if cnts_clean:
+                                    largest_int = max(cnts_clean, key=cv2.contourArea)
+                                    ref_mask = np.zeros_like(crop_gray)
+                                    cv2.drawContours(ref_mask, [largest_int], -1, 255, -1)
+
+                                    k_size = max(5, int(min(bw, bh) * 0.025))
+                                    eroded_int = cv2.erode(
+                                        ref_mask,
+                                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size)),
+                                        iterations=1,
+                                    )
+
+                                    # Dark text ink inside the eroded white interior
+                                    ink = (crop_gray < 140) & (eroded_int == 255)
+                                    ys, xs = np.where(ink)
+                                    if len(xs) >= 20:
+                                        tx1, tx2 = int(np.min(xs)), int(np.max(xs))
+                                        ty1, ty2 = int(np.min(ys)), int(np.max(ys))
+                                        if (tx2 - tx1) >= 15 and (ty2 - ty1) >= 15:
+                                            text_crop = crop_bgr[ty1:ty2, tx1:tx2]
+                                            angle_cand, tilt_conf, _, _ = detect_crop_tilt_angle(
+                                                text_crop, is_dark_text=True
+                                            )
+                                            if (
+                                                tilt_conf >= auto_rotate_confidence_threshold
+                                                and abs(angle_cand) >= 3.0
+                                            ):
+                                                rotation_deg = float(angle_cand)
+                                                log_message(
+                                                    f"Detection {detection.get('bbox')}: text tilt detected {rotation_deg:.1f}° (conf: {tilt_conf:.2f})",
+                                                    verbose=verbose,
+                                                )
+                    except Exception as e:
+                        log_message(
+                            f"Text tilt detection failed for {detection.get('bbox')}: {e}",
+                            verbose=verbose,
+                        )
+
+                    # 2. Fallback: Estimate tilt from bubble boundary mask
+                    if abs(rotation_deg) < 0.01 and base_mask is not None:
+                        try:
+                            rotation_deg = estimate_mask_rotation_angle(
+                                base_mask, verbose=verbose
+                            )
+                        except Exception as e:
+                            log_message(
+                                f"Rotation estimation failed for {detection.get('bbox')}: {e}",
+                                verbose=verbose,
+                            )
+
                 processed_bubbles.append(
                     {
                         "mask": final_mask,
@@ -846,6 +931,7 @@ def clean_speech_bubbles(
                         "text_color_bgr": text_color_bgr,
                         "is_sam": is_sam_mask,
                         "inpainted": False,
+                        "rotation_deg": rotation_deg,
                     }
                 )
                 log_message(
@@ -873,10 +959,16 @@ def clean_speech_bubbles(
                 )
                 temp_files = []
                 try:
-                    if inpaint_method == "flux_klein_9b":
+                    if inpaint_method in ("flux_klein_9b", "flux_klein_4b", "flux_dev", "sd_inpainting"):
                         backend = flux_backend
+                        variant = {
+                            "flux_klein_9b": "9b",
+                            "flux_klein_4b": "4b",
+                            "flux_dev": "dev",
+                            "sd_inpainting": "sd_inpainting",
+                        }[inpaint_method]
                         inpainter = FluxKleinInpainter(
-                            variant="9b",
+                            variant=variant,
                             device=device,
                             huggingface_token=flux_hf_token,
                             num_inference_steps=int(flux_num_inference_steps),
@@ -888,22 +980,8 @@ def clean_speech_bubbles(
                             sdcpp_diffusion_quant=flux_sdcpp_diffusion_quant,
                             sdcpp_text_encoder_quant=flux_sdcpp_text_encoder_quant,
                             verbose=verbose,
-                        )
-                    elif inpaint_method == "flux_klein_4b":
-                        backend = flux_backend
-                        inpainter = FluxKleinInpainter(
-                            variant="4b",
-                            device=device,
-                            huggingface_token=flux_hf_token,
-                            num_inference_steps=int(flux_num_inference_steps),
-                            low_vram=flux_low_vram,
-                            luminance_correction=flux_luminance_correction,
-                            upscale_small_crops=flux_upscale_small_crops,
-                            backend=backend,
-                            sdcpp_cache_mode=flux_sdcpp_cache_mode,
-                            sdcpp_diffusion_quant=flux_sdcpp_diffusion_quant,
-                            sdcpp_text_encoder_quant=flux_sdcpp_text_encoder_quant,
-                            verbose=verbose,
+                            cloudflare_accounts=cloudflare_accounts,
+                            colab_server_url=colab_server_url,
                         )
                     else:
                         # Default to Flux Kontext
@@ -1158,6 +1236,27 @@ def retry_cleaning_with_otsu(
         verbose=verbose,
     )
 
+    rotation_deg = bubble_info.get("rotation_deg")
+    if rotation_deg is None:
+        rotation_deg = 0.0
+        if text_bbox is not None:
+            try:
+                tx1, ty1, tx2, ty2 = text_bbox
+                if (tx2 - tx1) >= 12 and (ty2 - ty1) >= 12:
+                    text_crop = image[ty1:ty2, tx1:tx2]
+                    angle_cand, tilt_conf, _, _ = detect_crop_tilt_angle(
+                        text_crop, is_dark_text=True
+                    )
+                    if tilt_conf >= 0.5 and abs(angle_cand) >= 3.0:
+                        rotation_deg = float(angle_cand)
+            except Exception:
+                pass
+        if abs(rotation_deg) < 0.01 and base_mask is not None:
+            try:
+                rotation_deg = estimate_mask_rotation_angle(base_mask, verbose=verbose)
+            except Exception:
+                rotation_deg = 0.0
+
     return {
         "mask": final_mask,
         "base_mask": _normalize_mask(base_mask),
@@ -1167,4 +1266,5 @@ def retry_cleaning_with_otsu(
         "text_bbox": text_bbox,
         "text_color_bgr": text_color_bgr,
         "is_sam": bubble_info.get("is_sam", False),
+        "rotation_deg": rotation_deg,
     }

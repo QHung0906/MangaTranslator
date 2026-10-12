@@ -149,8 +149,11 @@ def call_openai_compatible_endpoint(
             user_content.append({"type": "image_url", "image_url": image_url})
         else:
             log_message(f"Invalid image part format: {part}", always_print=True)
-    user_content.append({"type": "text", "text": text_part["text"]})
-    messages.append({"role": "user", "content": user_content})
+    if image_parts:
+        user_content.append({"type": "text", "text": text_part["text"]})
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": text_part["text"]})
 
     payload = {
         "model": model_name,
@@ -182,14 +185,8 @@ def call_openai_compatible_endpoint(
     if top_p is not None and not is_anthropic_model and not no_sampling:
         payload["top_p"] = top_p
 
-    top_k = generation_config.get("top_k")
-    if (
-        top_k is not None
-        and not is_openai_model
-        and not is_anthropic_model
-        and not no_sampling
-    ):
-        payload["top_k"] = top_k
+    # top_k is not supported by standard OpenAI chat completions API and causes 400 errors on providers like Groq
+    # So we omit it for OpenAI-Compatible endpoints.
 
     reasoning_effort = generation_config.get("reasoning_effort")
     if is_anthropic_model and reasoning_effort:

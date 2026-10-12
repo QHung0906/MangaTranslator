@@ -64,6 +64,7 @@ class UITranslationProviderSettings:
     openrouter_api_key: Optional[str] = ""
     openai_compatible_url: str = "http://localhost:8080/v1"
     openai_compatible_api_key: Optional[str] = ""
+    manual_json_translation: bool = False
 
 
 @dataclass
@@ -107,6 +108,8 @@ class UIRenderingSettings:
     auto_vertical_text: bool = False
     vertical_line_spacing_mult: float = 1.0
     vertical_font_size_mult: float = 1.0
+    auto_rotate_text: bool = True
+    auto_rotate_confidence_threshold: float = 0.5
 
 
 @dataclass
@@ -133,9 +136,11 @@ class UIOutsideTextSettings:
     seed: int = 1  # -1 = random
     huggingface_token: str = ""
     inpainting_method: str = (
-        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_kontext, opencv, none
+        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_dev, sd_inpainting, flux_kontext, opencv, none
     )
-    flux_backend: str = "sdnq"  # "sdcpp", "sdnq", "nunchaku" (Kontext only)
+    flux_backend: str = "sdnq"  # "sdcpp", "sdnq", "nunchaku" (Kontext only), "cloudflare", "remote_colab"
+    cloudflare_accounts: str = ""
+    colab_server_url: str = ""
     flux_low_vram: bool = False  # Use CPU offload for SDNQ
     flux_sdcpp_cache_mode: str = "none"
     flux_sdcpp_diffusion_quant: str = "Q4_K_M"
@@ -272,6 +277,7 @@ class UIConfigState:
             "openrouter_api_key": self.provider_settings.openrouter_api_key,
             "openai_compatible_url": self.provider_settings.openai_compatible_url,
             "openai_compatible_api_key": self.provider_settings.openai_compatible_api_key,
+            "manual_json_translation": self.provider_settings.manual_json_translation,
             "model_name": self.llm_settings.model_name,
             "temperature": self.llm_settings.temperature,
             "top_p": self.llm_settings.top_p,
@@ -302,6 +308,10 @@ class UIConfigState:
             "supersampling_factor": self.rendering.supersampling_factor,
             "detach_trailing_punctuation": self.rendering.detach_trailing_punctuation,
             "auto_vertical_text": self.rendering.auto_vertical_text,
+            "auto_rotate_text": getattr(self.rendering, "auto_rotate_text", True),
+            "auto_rotate_confidence_threshold": getattr(
+                self.rendering, "auto_rotate_confidence_threshold", 0.5
+            ),
             "vertical_line_spacing_mult": self.rendering.vertical_line_spacing_mult,
             "vertical_font_size_mult": self.rendering.vertical_font_size_mult,
             "outside_text_enabled": self.outside_text.enabled,
@@ -309,6 +319,8 @@ class UIConfigState:
             "outside_text_huggingface_token": self.outside_text.huggingface_token,
             "outside_text_inpainting_method": self.outside_text.inpainting_method,
             "outside_text_flux_backend": self.outside_text.flux_backend,
+            "outside_text_cloudflare_accounts": self.outside_text.cloudflare_accounts,
+            "outside_text_colab_server_url": self.outside_text.colab_server_url,
             "outside_text_flux_low_vram": self.outside_text.flux_low_vram,
             "outside_text_flux_sdcpp_cache_mode": self.outside_text.flux_sdcpp_cache_mode,
             "outside_text_flux_sdcpp_diffusion_quant": self.outside_text.flux_sdcpp_diffusion_quant,
@@ -475,6 +487,14 @@ class UIConfigState:
                     "outside_text_flux_backend",
                     defaults.get("outside_text_flux_backend", "sdnq"),
                 ),
+                cloudflare_accounts=data.get(
+                    "outside_text_cloudflare_accounts",
+                    defaults.get("outside_text_cloudflare_accounts", ""),
+                ),
+                colab_server_url=data.get(
+                    "outside_text_colab_server_url",
+                    defaults.get("outside_text_colab_server_url", ""),
+                ),
                 flux_low_vram=data.get("outside_text_flux_low_vram", False),
                 flux_sdcpp_cache_mode=data.get(
                     "outside_text_flux_sdcpp_cache_mode",
@@ -594,6 +614,7 @@ class UIConfigState:
                 openai_compatible_api_key=data.get(
                     "openai_compatible_api_key", defaults["openai_compatible_api_key"]
                 ),
+                manual_json_translation=data.get("manual_json_translation", False),
             ),
             llm_settings=UITranslationLLMSettings(
                 model_name=data.get("model_name"),
@@ -658,6 +679,14 @@ class UIConfigState:
                 auto_vertical_text=data.get(
                     "auto_vertical_text",
                     defaults.get("auto_vertical_text", False),
+                ),
+                auto_rotate_text=data.get(
+                    "auto_rotate_text",
+                    defaults.get("auto_rotate_text", True),
+                ),
+                auto_rotate_confidence_threshold=data.get(
+                    "auto_rotate_confidence_threshold",
+                    defaults.get("auto_rotate_confidence_threshold", 0.5),
                 ),
                 vertical_line_spacing_mult=data.get("vertical_line_spacing_mult", 1.0),
                 vertical_font_size_mult=data.get("vertical_font_size_mult", 1.0),
@@ -818,6 +847,7 @@ def map_ui_to_backend_config(
         reading_direction=ui_state.llm_settings.reading_direction,
         translation_mode=ui_state.llm_settings.translation_mode,
         ocr_method=ui_state.llm_settings.ocr_method,
+        manual_json_translation=ui_state.provider_settings.manual_json_translation,
         enable_web_search=ui_state.general.enable_web_search,
         enable_code_execution=ui_state.general.enable_code_execution,
         use_custom_sampling=ui_state.general.use_custom_sampling,
@@ -865,6 +895,10 @@ def map_ui_to_backend_config(
         supersampling_factor=ui_state.rendering.supersampling_factor,
         detach_trailing_punctuation=ui_state.rendering.detach_trailing_punctuation,
         auto_vertical_text=ui_state.rendering.auto_vertical_text,
+        auto_rotate_text=getattr(ui_state.rendering, "auto_rotate_text", True),
+        auto_rotate_confidence_threshold=getattr(
+            ui_state.rendering, "auto_rotate_confidence_threshold", 0.5
+        ),
         vertical_line_spacing_mult=ui_state.rendering.vertical_line_spacing_mult,
         vertical_font_size_mult=ui_state.rendering.vertical_font_size_mult,
     )
@@ -899,6 +933,8 @@ def map_ui_to_backend_config(
         huggingface_token=ui_state.outside_text.huggingface_token,
         inpainting_method=ui_state.outside_text.inpainting_method,
         flux_backend=ui_state.outside_text.flux_backend,
+        cloudflare_accounts=ui_state.outside_text.cloudflare_accounts,
+        colab_server_url=ui_state.outside_text.colab_server_url,
         flux_low_vram=ui_state.outside_text.flux_low_vram,
         flux_sdcpp_cache_mode=ui_state.outside_text.flux_sdcpp_cache_mode,
         flux_sdcpp_diffusion_quant=ui_state.outside_text.flux_sdcpp_diffusion_quant,

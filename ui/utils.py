@@ -673,21 +673,21 @@ def get_reasoning_effort_config(
             return False, [], None
 
         if is_gemma_model(model_name):
-            return True, ["high", "minimal"], "high"
+            return True, ["high", "minimal"], "minimal"
 
         if is_gemini_3_model(model_name):
             if is_gemini_37_flash_model(model_name):
-                return True, ["high", "medium", "low"], "high"
+                return True, ["high", "medium", "low"], "minimal"
             if "flash" in lm:
-                return True, ["high", "medium", "low", "minimal"], "high"
+                return True, ["high", "medium", "low", "minimal"], "minimal"
             if "gemini-3.1" in lm:
-                return True, ["high", "medium", "low"], "high"
-            return True, ["high", "medium", "low"], "high"
+                return True, ["high", "medium", "low"], "minimal"
+            return True, ["high", "medium", "low"], "minimal"
 
         if is_gemini_25_flash_model(model_name) or is_gemini_25_pro_model(model_name):
-            return True, ["auto", "high", "medium", "low", "minimal", "none"], "auto"
+            return True, ["auto", "high", "medium", "low", "minimal", "none"], "minimal"
         else:
-            return True, ["auto", "high", "medium", "low", "minimal"], "auto"
+            return True, ["auto", "high", "medium", "low", "minimal"], "minimal"
 
     elif provider == "OpenAI":
         if not is_openai_reasoning_model(model_name):
@@ -808,12 +808,12 @@ def get_reasoning_effort_config(
                 return False, [], None
 
             if is_gemma_model(model_name):
-                return True, ["high", "minimal"], "high"
+                return True, ["high", "minimal"], "minimal"
 
             if is_gemini_37_flash_model(model_name):
-                return True, ["xhigh", "high", "medium", "low", "none"], "high"
+                return True, ["xhigh", "high", "medium", "low", "none"], "minimal"
 
-            return True, ["xhigh", "high", "medium", "low", "minimal", "none"], "high"
+            return True, ["xhigh", "high", "medium", "low", "minimal", "none"], "minimal"
 
         if is_anthropic_model_family(model_name):
             return anthropic_reasoning_effort_config(model_name)
@@ -1073,6 +1073,7 @@ def update_translation_ui(
     )
 
     google_visible_update = gr.update(visible=(provider == "Google"))
+    manual_json_visible_update = gr.update(visible=(provider == "Google"))
     openai_visible_update = gr.update(visible=(provider == "OpenAI"))
     anthropic_visible_update = gr.update(visible=(provider == "Anthropic"))
     xai_visible_update = gr.update(visible=(provider == "SpaceXAI"))
@@ -1301,6 +1302,7 @@ def update_translation_ui(
         reasoning_effort_visible_update,
         effort_update,
         verbosity_update,
+        manual_json_visible_update,
     )
 
 

@@ -1,3 +1,4 @@
+import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -5,7 +6,7 @@ import skia
 from PIL import Image
 
 from core.config import RenderingConfig
-from core.image.image_utils import calculate_centroid_expansion_box
+from core.image.image_utils import calculate_centroid_expansion_box, unrotate_mask
 from core.text.drawing_engine import (
     draw_layout,
     load_font_resources,
@@ -29,6 +30,7 @@ AUTO_VERTICAL_MAX_CHARS = 12
 AUTO_VERTICAL_MAX_WORDS = 1
 AUTO_VERTICAL_MAX_HORIZONTAL_FILL = 0.45
 AUTO_VERTICAL_MIN_FILL_GAIN = 0.20
+OSB_TILT_SUPERSAMPLE_MARGIN = 8
 
 
 def _plain_text_for_layout_policy(text: str) -> str:
@@ -157,10 +159,13 @@ def render_text_skia(
     layout_box_top_left = None
     safe_area_result = None
     safe_area_fallback_logged = False
+    mask_for_layout = cleaned_mask
     if cleaned_mask is not None:
         try:
+            if rotation_deg and abs(rotation_deg) > 0.01:
+                mask_for_layout = unrotate_mask(cleaned_mask, rotation_deg)
             safe_area_result = calculate_centroid_expansion_box(
-                cleaned_mask, padding_pixels=config.padding_pixels, verbose=verbose
+                mask_for_layout, padding_pixels=config.padding_pixels, verbose=verbose
             )
         except ImageProcessingError:
             # Safe area calculation failed, will use fallback below
@@ -242,7 +247,9 @@ def render_text_skia(
     for style_key in ["italic", "bold", "bold_italic"]:
         style_path = font_variants.get(style_key)
         if style_path:
-            _, _typeface, _hb_face = load_font_resources(str(style_path))
+            _, _typeface, _hb_face = load_font_resources(
+                str(style_path), style=style_key
+            )
             if _hb_face:
                 preload_hb_faces[style_key] = _hb_face
 
@@ -275,7 +282,7 @@ def render_text_skia(
             config.badness_exponent,
             verbose,
             bubble_id,
-            cleaned_mask,
+            mask_for_layout,
             layout_box_top_left,
             config.detach_trailing_punctuation,
             use_vertical_stack,
@@ -338,7 +345,7 @@ def render_text_skia(
             font_path = font_variants.get(style)
             if font_path:
                 log_message(f"Loading {style}: {font_path.name}", verbose=verbose)
-                _, typeface, hb_face = load_font_resources(str(font_path))
+                _, typeface, hb_face = load_font_resources(str(font_path), style=style)
                 if typeface and hb_face:
                     loaded_typefaces[style] = typeface
                     loaded_hb_faces[style] = hb_face
@@ -389,10 +396,20 @@ def render_text_skia(
         # Crop the bbox region from the original image
         # Ensure bbox coordinates are within image bounds
         img_width, img_height = pil_image.size
-        crop_x1 = max(0, x1)
-        crop_y1 = max(0, y1)
-        crop_x2 = min(img_width, x2)
-        crop_y2 = min(img_height, y2)
+        tilt_margin = 0
+        if rotation_deg and abs(rotation_deg) > 0.01:
+            tilt_margin = (
+                math.ceil(
+                    max(bubble_width, bubble_height)
+                    * math.sin(math.radians(abs(rotation_deg)))
+                    / 2
+                )
+                + OSB_TILT_SUPERSAMPLE_MARGIN
+            )
+        crop_x1 = max(0, x1 - tilt_margin)
+        crop_y1 = max(0, y1 - tilt_margin)
+        crop_x2 = min(img_width, x2 + tilt_margin)
+        crop_y2 = min(img_height, y2 + tilt_margin)
 
         cropped_region = pil_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
         crop_width = crop_x2 - crop_x1

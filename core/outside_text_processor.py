@@ -22,6 +22,10 @@ from core.config import MangaTranslatorConfig
 from core.image.image_utils import cv2_to_pil, pil_to_cv2, process_bubble_image_cached
 from core.image.inpainting import FluxKleinInpainter, FluxKontextInpainter
 from core.image.ocr_detection import OutsideTextDetector, extract_text_with_manga_ocr
+from core.image.tilt_detection import (
+    compute_effective_tilt_angle,
+    detect_crop_tilt_angle,
+)
 from core.ml.model_manager import get_model_manager
 from utils.logging import log_message
 
@@ -147,6 +151,25 @@ def _build_outside_text_data(
                     needs_text_bg = True
                     break
 
+        angle_deg, tilt_conf, obb_dims, tilt_axis = (
+            0.0,
+            0.0,
+            (float(w), float(h)),
+            "none",
+        )
+        osb_tilt_estimation_side_pixels = 256
+        if getattr(config.outside_text, "osb_follow_tilt", False) and original_cv_image is not None:
+            rx1, ry1, rx2, ry2 = raw_bbox_tuple
+            raw_crop_cv = original_cv_image[ry1:ry2, rx1:rx2]
+            if raw_crop_cv.size > 0:
+                angle_deg, tilt_conf, obb_dims, tilt_axis = detect_crop_tilt_angle(
+                    crop_cv=raw_crop_cv,
+                    is_dark_text=original_text_colors.get(raw_bbox_tuple, True),
+                    max_side=osb_tilt_estimation_side_pixels,
+                    deadband_deg=getattr(config.outside_text, "osb_min_tilt_deg", 3.0),
+                    max_tilt_deg=getattr(config.outside_text, "osb_max_tilt_deg", 20.0),
+                )
+
         try:
             is_success, buffer = cv2.imencode(cv2_ext, outside_text_image_cv)
             if is_success:
@@ -164,6 +187,10 @@ def _build_outside_text_data(
                         "aspect_ratio": aspect_ratio,
                         "needs_text_background": needs_text_bg,
                         "original_crop_pil": original_crop_pil,
+                        "tilt_deg": angle_deg,
+                        "tilt_conf": tilt_conf,
+                        "tilt_axis": tilt_axis,
+                        "oriented_dimensions": obb_dims,
                     }
                 )
         except Exception as e:
@@ -363,73 +390,48 @@ def prepare_outside_text_work(
         area_ratio_threshold = getattr(
             config.outside_text, "osb_render_expansion_area_ratio_threshold", 0.005
         )
-        if max(narrow_expansion_mult, tiny_expansion_mult) > 1.0:
+        res_scale = max(0.5, min(img_w, img_h) / 1500.0)
+        buffer = max(4, int(round(OSB_EXPANSION_PIXEL_BUFFER * res_scale)))
+
+        if outside_text_results:
             log_message(
-                "Expanding OSB bboxes "
-                f"(narrow/tall: {narrow_expansion_mult}x, tiny: {tiny_expansion_mult}x)...",
+                "Expanding OSB bboxes dynamically (panel & obstacle-aware space allocation)...",
                 verbose=verbose,
             )
             expanded_results = []
             for i, res in enumerate(outside_text_results):
                 bbox, conf = res
                 x1, y1, x2, y2 = bbox
-                w = x2 - x1
-                h = y2 - y1
+                w = max(1, x2 - x1)
+                h = max(1, y2 - y1)
 
-                aspect_ratio = float(w) / float(max(1, h))
-                area_ratio = (w * h) / float(max(1, img_w * img_h))
-                is_narrow_tall = aspect_ratio <= aspect_ratio_threshold
-                is_tiny = area_ratio < area_ratio_threshold
+                aspect_ratio = float(w) / float(h)
+                is_horizontal = aspect_ratio >= 1.0
 
-                expansion_mult = 1.0
-                if is_narrow_tall:
-                    expansion_mult = max(expansion_mult, narrow_expansion_mult)
-                if is_tiny:
-                    expansion_mult = max(expansion_mult, tiny_expansion_mult)
+                cx = x1 + w / 2.0
+                cy = y1 + h / 2.0
 
-                if expansion_mult <= 1.0:
-                    expanded_results.append(
-                        ([int(x1), int(y1), int(x2), int(y2)], conf)
-                    )
-                    continue
-
-                cx = x1 + w / 2
-                cy = y1 + h / 2
-
-                new_w = w * expansion_mult
-                new_h = h * expansion_mult
-
-                nx1 = int(cx - new_w / 2)
-                ny1 = int(cy - new_h / 2)
-                nx2 = int(cx + new_w / 2)
-                ny2 = int(cy + new_h / 2)
-
-                nx1 = max(0, nx1)
-                ny1 = max(0, ny1)
-                nx2 = min(img_w, nx2)
-                ny2 = min(img_h, ny2)
-
+                # 1. Determine panel boundaries
+                associated_panel = None
                 if panels:
-                    associated_panel = None
                     for p in panels:
                         px1, py1, px2, py2 = p
                         if px1 <= cx <= px2 and py1 <= cy <= py2:
                             associated_panel = p
                             break
-                    if associated_panel:
-                        px1, py1, px2, py2 = associated_panel
-                        panel_buffer = OSB_EXPANSION_PIXEL_BUFFER
-                        c_px1 = min(int(px1) + panel_buffer, int(px2))
-                        c_py1 = min(int(py1) + panel_buffer, int(py2))
-                        c_px2 = max(int(px2) - panel_buffer, int(px1))
-                        c_py2 = max(int(py2) - panel_buffer, int(py1))
 
-                        nx1 = max(c_px1, nx1)
-                        ny1 = max(c_py1, ny1)
-                        nx2 = min(c_px2, nx2)
-                        ny2 = min(c_py2, ny2)
+                if associated_panel:
+                    c_px1 = min(int(associated_panel[0]) + buffer, int(associated_panel[2]))
+                    c_py1 = min(int(associated_panel[1]) + buffer, int(associated_panel[3]))
+                    c_px2 = max(int(associated_panel[2]) - buffer, int(associated_panel[0]))
+                    c_py2 = max(int(associated_panel[3]) - buffer, int(associated_panel[1]))
+                else:
+                    c_px1 = buffer
+                    c_py1 = buffer
+                    c_px2 = max(buffer, img_w - buffer)
+                    c_py2 = max(buffer, img_h - buffer)
 
-                buffer = OSB_EXPANSION_PIXEL_BUFFER
+                # 2. Gather obstacles (speech bubbles and other outside text regions)
                 obstacles = []
                 if bubble_data:
                     for b in bubble_data:
@@ -448,13 +450,11 @@ def prepare_outside_text_work(
                 for j, other_res in enumerate(outside_text_results):
                     if i == j:
                         continue
-
                     if j < i:
                         ob, _ = expanded_results[j]
                     else:
                         ob, _ = other_res
                     obx1, oby1, obx2, oby2 = [int(c) for c in ob]
-
                     obstacles.append(
                         (
                             max(0, obx1 - buffer),
@@ -464,35 +464,65 @@ def prepare_outside_text_work(
                         )
                     )
 
+                # 3. Compute available clear space around (cx, cy)
+                avail_x1 = c_px1
+                avail_x2 = c_px2
+                avail_y1 = c_py1
+                avail_y2 = c_py2
+
                 for ox1, oy1, ox2, oy2 in obstacles:
-                    if not (nx2 <= ox1 or nx1 >= ox2 or ny2 <= oy1 or ny1 >= oy2):
-                        can_retract_nx2 = (nx2 - ox1) if (ox1 >= x2) else float("inf")
-                        can_retract_nx1 = (ox2 - nx1) if (ox2 <= x1) else float("inf")
-                        can_retract_ny2 = (ny2 - oy1) if (oy1 >= y2) else float("inf")
-                        can_retract_ny1 = (oy2 - ny1) if (oy2 <= y1) else float("inf")
+                    if not (y2 <= oy1 or y1 >= oy2):
+                        if ox2 <= cx:
+                            avail_x1 = max(avail_x1, ox2)
+                        elif ox1 >= cx:
+                            avail_x2 = min(avail_x2, ox1)
+                    if not (x2 <= ox1 or x1 >= ox2):
+                        if oy2 <= cy:
+                            avail_y1 = max(avail_y1, oy2)
+                        elif oy1 >= cy:
+                            avail_y2 = min(avail_y2, oy1)
 
-                        min_retract = min(
-                            can_retract_nx2,
-                            can_retract_nx1,
-                            can_retract_ny2,
-                            can_retract_ny1,
-                        )
-                        if min_retract != float("inf"):
-                            if min_retract == can_retract_nx2:
-                                nx2 = ox1
-                            elif min_retract == can_retract_nx1:
-                                nx1 = ox2
-                            elif min_retract == can_retract_ny2:
-                                ny2 = oy1
-                            elif min_retract == can_retract_ny1:
-                                ny1 = oy2
+                avail_x1 = min(avail_x1, int(x1))
+                avail_x2 = max(avail_x2, int(x2))
+                avail_y1 = min(avail_y1, int(y1))
+                avail_y2 = max(avail_y2, int(y2))
 
-                nx1 = min(nx1, int(x1))
-                ny1 = min(ny1, int(y1))
-                nx2 = max(nx2, int(x2))
-                ny2 = max(ny2, int(y2))
+                avail_w = max(w, avail_x2 - avail_x1)
+                avail_h = max(h, avail_y2 - avail_y1)
 
-                expanded_results.append(([nx1, ny1, nx2, ny2], conf))
+                # 4. Apply expansion
+                if is_horizontal:
+                    # Horizontal text: expand width to accommodate Latin text
+                    target_w = min(avail_w, max(w, max(int(round(w * 1.8)), w + int(round(60.0 * res_scale)))))
+                    nx1 = max(avail_x1, min(avail_x2 - target_w, int(cx - target_w / 2.0)))
+                    nx2 = min(avail_x2, nx1 + target_w)
+                    nx1 = min(nx1, int(x1))
+                    nx2 = max(nx2, int(x2))
+
+                    safe_h = max(h, min(avail_h, int(round(h * 1.3))))
+                    ny1 = max(avail_y1, min(avail_y2 - safe_h, int(cy - safe_h / 2.0)))
+                    ny2 = min(avail_y2, ny1 + safe_h)
+                    ny1 = min(ny1, int(y1))
+                    ny2 = max(ny2, int(y2))
+                else:
+                    # Vertical text: Japanese vertical columns require horizontal width for Latin words.
+                    # Derive Latin word width dynamically from character height and resolution.
+                    char_h_est = max(12.0, min(float(w), float(h) / 3.0))
+                    desired_latin_w = max(float(w), min(130.0 * res_scale, max(float(w) * 2.2, char_h_est * 3.5)))
+                    target_w = min(avail_w, int(round(desired_latin_w)))
+
+                    nx1 = max(avail_x1, min(avail_x2 - target_w, int(cx - target_w / 2.0)))
+                    nx2 = min(avail_x2, nx1 + target_w)
+                    nx1 = min(nx1, int(x1))
+                    nx2 = max(nx2, int(x2))
+
+                    safe_h = max(h, min(avail_h, int(round(h * 1.15))))
+                    ny1 = max(avail_y1, min(avail_y2 - safe_h, int(cy - safe_h / 2.0)))
+                    ny2 = min(avail_y2, ny1 + safe_h)
+                    ny1 = min(ny1, int(y1))
+                    ny2 = max(ny2, int(y2))
+
+                expanded_results.append(([int(nx1), int(ny1), int(nx2), int(ny2)], conf))
 
             outside_text_results = expanded_results
 
@@ -547,12 +577,8 @@ def prepare_outside_text_work(
             x1, y1, x2, y2 = [int(c) for c in bbox_coords]
             bbox_tuple = (x1, y1, x2, y2)
 
-            bbox_area_img = pil_image.crop((x1, y1, x2, y2))
+            bbox_area_img = pil_image.crop((x1, y1, x2, y2)).convert("RGB")
             bbox_array = np.array(bbox_area_img)
-
-            if bbox_array.shape[-1] == 4:
-                bbox_array = bbox_array[..., :3]
-
             pixels = bbox_array.reshape(-1, 3)
 
             # Use K-Means to find 2 dominant colors
@@ -637,6 +663,7 @@ def prepare_outside_text_work(
 
 def finish_outside_text_work(
     work: OutsideTextWork,
+    skipped_bboxes: Optional[set] = None,
 ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
     """Run OSB inpainting for prepared work and attach render metadata."""
     pil_image = work.pil_image
@@ -651,6 +678,71 @@ def finish_outside_text_work(
     img_h = work.img_h
     outside_text_data = work.outside_text_data
 
+    skipped_bboxes = skipped_bboxes or set()
+
+    def _is_group_skipped(grp: Dict[str, Any], skipped_set: set) -> bool:
+        if not skipped_set:
+            return False
+
+        cand_boxes = []
+        orig_b = grp.get("original_bbox")
+        if orig_b:
+            ox = int(orig_b.get("x", 0))
+            oy = int(orig_b.get("y", 0))
+            ow = int(orig_b.get("width", 0))
+            oh = int(orig_b.get("height", 0))
+            if ow > 0 and oh > 0:
+                cand_boxes.append((ox, oy, ox + ow, oy + oh))
+
+        exp_b = grp.get("bbox")
+        if exp_b:
+            bx = int(exp_b.get("x", 0))
+            by = int(exp_b.get("y", 0))
+            bw = int(exp_b.get("width", 0))
+            bh = int(exp_b.get("height", 0))
+            if bw > 0 and bh > 0:
+                cand_boxes.append((bx, by, bx + bw, by + bh))
+
+        mask_indices = grp.get("mask_indices", [])
+        if mask_indices and outside_text_results:
+            for idx in mask_indices:
+                if 0 <= idx < len(outside_text_results):
+                    cand_boxes.append(tuple(int(c) for c in outside_text_results[idx][0]))
+        if mask_indices and raw_outside_text_results:
+            for idx in mask_indices:
+                if 0 <= idx < len(raw_outside_text_results):
+                    cand_boxes.append(tuple(int(c) for c in raw_outside_text_results[idx][0]))
+
+        # 1. Exact match
+        for cb in cand_boxes:
+            if cb in skipped_set:
+                return True
+
+        # 2. Geometric intersection & overlap check
+        for (gx1, gy1, gx2, gy2) in cand_boxes:
+            gcx = (gx1 + gx2) / 2.0
+            gcy = (gy1 + gy2) / 2.0
+            g_area = max(1.0, float((gx2 - gx1) * (gy2 - gy1)))
+
+            for (sx1, sy1, sx2, sy2) in skipped_set:
+                scx = (sx1 + sx2) / 2.0
+                scy = (sy1 + sy2) / 2.0
+                s_area = max(1.0, float((sx2 - sx1) * (sy2 - sy1)))
+
+                ix1 = max(gx1, sx1)
+                iy1 = max(gy1, sy1)
+                ix2 = min(gx2, sx2)
+                iy2 = min(gy2, sy2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter_area = float((ix2 - ix1) * (iy2 - iy1))
+                    if (inter_area / g_area >= 0.3) or (inter_area / s_area >= 0.3):
+                        return True
+
+                if (sx1 <= gcx <= sx2 and sy1 <= gcy <= sy2) or (gx1 <= scx <= gx2 and gy1 <= scy <= gy2):
+                    return True
+
+        return False
+
     extracted_text_colors = {}
     none_skipped_clip_bboxes = set()
     current_image = pil_image
@@ -661,11 +753,17 @@ def finish_outside_text_work(
         # Create inpainter based on selected method
         inpainting_method = config.outside_text.inpainting_method
         inpainter = None
-        if inpainting_method == "flux_klein_9b":
+        if inpainting_method in ("flux_klein_9b", "flux_klein_4b", "flux_dev", "sd_inpainting"):
             try:
                 backend = config.outside_text.flux_backend
+                variant = {
+                    "flux_klein_9b": "9b",
+                    "flux_klein_4b": "4b",
+                    "flux_dev": "dev",
+                    "sd_inpainting": "sd_inpainting",
+                }[inpainting_method]
                 inpainter = FluxKleinInpainter(
-                    variant="9b",
+                    variant=variant,
                     device=config.device,
                     huggingface_token=config.outside_text.huggingface_token,
                     num_inference_steps=config.outside_text.flux_num_inference_steps,
@@ -677,43 +775,31 @@ def finish_outside_text_work(
                     sdcpp_diffusion_quant=config.outside_text.flux_sdcpp_diffusion_quant,
                     sdcpp_text_encoder_quant=config.outside_text.flux_sdcpp_text_encoder_quant,
                     verbose=verbose,
+                    cloudflare_accounts=config.outside_text.cloudflare_accounts,
+                    colab_server_url=config.outside_text.colab_server_url,
                 )
-                backend_label = "sd.cpp" if backend == "sdcpp" else "SDNQ"
+                backend_label = (
+                    "Remote Colab"
+                    if backend == "remote_colab"
+                    else (
+                        "Cloudflare"
+                        if backend == "cloudflare"
+                        else ("sd.cpp" if backend == "sdcpp" else "SDNQ")
+                    )
+                )
+                model_label = {
+                    "9b": "Flux.2 Klein 9B",
+                    "4b": "Flux.2 Klein 4B",
+                    "dev": "Flux.2 Dev",
+                    "sd_inpainting": "Stable Diffusion v1.5 Inpainting",
+                }[variant]
                 log_message(
-                    f"Using Flux.2 Klein 9B ({backend_label}) for inpainting",
+                    f"Using {model_label} ({backend_label}) for inpainting",
                     verbose=verbose,
                 )
             except Exception as e:
                 log_message(
-                    f"Flux Klein 9B unavailable ({e}), falling back to OpenCV",
-                    verbose=verbose,
-                )
-
-        if inpainting_method == "flux_klein_4b":
-            try:
-                backend = config.outside_text.flux_backend
-                inpainter = FluxKleinInpainter(
-                    variant="4b",
-                    device=config.device,
-                    huggingface_token=config.outside_text.huggingface_token,
-                    num_inference_steps=config.outside_text.flux_num_inference_steps,
-                    low_vram=config.outside_text.flux_low_vram,
-                    luminance_correction=config.outside_text.flux_luminance_correction,
-                    upscale_small_crops=config.outside_text.flux_upscale_small_crops,
-                    backend=backend,
-                    sdcpp_cache_mode=config.outside_text.flux_sdcpp_cache_mode,
-                    sdcpp_diffusion_quant=config.outside_text.flux_sdcpp_diffusion_quant,
-                    sdcpp_text_encoder_quant=config.outside_text.flux_sdcpp_text_encoder_quant,
-                    verbose=verbose,
-                )
-                backend_label = "sd.cpp" if backend == "sdcpp" else "SDNQ"
-                log_message(
-                    f"Using Flux.2 Klein 4B ({backend_label}) for inpainting",
-                    verbose=verbose,
-                )
-            except Exception as e:
-                log_message(
-                    f"Flux Klein 4B unavailable ({e}), falling back to OpenCV",
+                    f"{inpainting_method} unavailable ({e}), falling back to OpenCV",
                     verbose=verbose,
                 )
 
@@ -964,6 +1050,13 @@ def finish_outside_text_work(
                         continue
                     region_seed = base_seed + i if base_seed > 0 else base_seed
 
+                    if _is_group_skipped(group, skipped_bboxes):
+                        log_message(
+                            f"Skipping OSB region {i + 1} inpainting (skipped by user)",
+                            always_print=True,
+                        )
+                        continue
+
                     original_bbox_dict = group.get("original_bbox")
                     composite_clip_bbox = None
                     fill_color = None
@@ -975,11 +1068,11 @@ def finish_outside_text_work(
                         ow = int(original_bbox_dict.get("width", 0))
                         oh = int(original_bbox_dict.get("height", 0))
                         if ow > 0 and oh > 0:
+                            composite_clip_bbox = (ox, oy, ox + ow, oy + oh)
                             ox0 = max(0, min(img_w, ox))
                             oy0 = max(0, min(img_h, oy))
                             ox1 = max(0, min(img_w, ox + ow))
                             oy1 = max(0, min(img_h, oy + oh))
-                            composite_clip_bbox = (ox, oy, ox + ow, oy + oh)
 
                             # Determine detected text color for this region to ensure contrast
                             group_bg_is_dark = None
@@ -1202,16 +1295,16 @@ def finish_outside_text_work(
 
                                     force_fill = inpainting_method == "opencv"
 
-                                    # Get expanded bounds for this group to check solid color and for cv2 fill
+                                    # Get raw text bounds for this group to check solid color and for cv2 fill
                                     p_x0, p_y0, p_x1, p_y1 = ox, oy, ox + ow, oy + oh
                                     mask_indices = group.get("mask_indices", [])
-                                    if mask_indices and outside_text_results:
+                                    if mask_indices and raw_outside_text_results:
                                         p_x0 = max(
                                             0,
                                             int(
                                                 min(
                                                     [
-                                                        outside_text_results[idx][0][0]
+                                                        raw_outside_text_results[idx][0][0]
                                                         for idx in mask_indices
                                                     ]
                                                 )
@@ -1222,7 +1315,7 @@ def finish_outside_text_work(
                                             int(
                                                 min(
                                                     [
-                                                        outside_text_results[idx][0][1]
+                                                        raw_outside_text_results[idx][0][1]
                                                         for idx in mask_indices
                                                     ]
                                                 )
@@ -1233,7 +1326,7 @@ def finish_outside_text_work(
                                             int(
                                                 max(
                                                     [
-                                                        outside_text_results[idx][0][2]
+                                                        raw_outside_text_results[idx][0][2]
                                                         for idx in mask_indices
                                                     ]
                                                 )
@@ -1244,20 +1337,23 @@ def finish_outside_text_work(
                                             int(
                                                 max(
                                                     [
-                                                        outside_text_results[idx][0][3]
+                                                        raw_outside_text_results[idx][0][3]
                                                         for idx in mask_indices
                                                     ]
                                                 )
                                             ),
                                         )
 
-                                    # Simply check if the expanded boundary is solid color
+                                    # Simply check if the boundary is solid color
                                     expanded_is_solid = is_border_solid
                                     if not force_fill:
-                                        ex_sx1 = max(0, p_x0 - OSB_EXPANSION_PX)
-                                        ex_sy1 = max(0, p_y0 - OSB_EXPANSION_PX)
-                                        ex_sx2 = min(img_w, p_x1 + OSB_EXPANSION_PX)
-                                        ex_sy2 = min(img_h, p_y1 + OSB_EXPANSION_PX)
+                                        box_w = max(1, p_x1 - p_x0)
+                                        box_h = max(1, p_y1 - p_y0)
+                                        adaptive_pad = max(2, min(10, int(round(min(box_w, box_h) * 0.06))))
+                                        ex_sx1 = max(0, p_x0 - adaptive_pad)
+                                        ex_sy1 = max(0, p_y0 - adaptive_pad)
+                                        ex_sx2 = min(img_w, p_x1 + adaptive_pad)
+                                        ex_sy2 = min(img_h, p_y1 + adaptive_pad)
 
                                         if ex_sx2 > ex_sx1 and ex_sy2 > ex_sy1:
                                             # Grab boundary pixels using Numpy directly for speed
@@ -1352,13 +1448,13 @@ def finish_outside_text_work(
                         new_img = current_image.copy()
 
                         mask_indices = group.get("mask_indices", [])
-                        if mask_indices and outside_text_results:
+                        if mask_indices and raw_outside_text_results:
                             p_x0 = max(
                                 0,
                                 int(
                                     min(
                                         [
-                                            outside_text_results[idx][0][0]
+                                            raw_outside_text_results[idx][0][0]
                                             for idx in mask_indices
                                         ]
                                     )
@@ -1369,7 +1465,7 @@ def finish_outside_text_work(
                                 int(
                                     min(
                                         [
-                                            outside_text_results[idx][0][1]
+                                            raw_outside_text_results[idx][0][1]
                                             for idx in mask_indices
                                         ]
                                     )
@@ -1380,7 +1476,7 @@ def finish_outside_text_work(
                                 int(
                                     max(
                                         [
-                                            outside_text_results[idx][0][2]
+                                            raw_outside_text_results[idx][0][2]
                                             for idx in mask_indices
                                         ]
                                     )
@@ -1391,7 +1487,7 @@ def finish_outside_text_work(
                                 int(
                                     max(
                                         [
-                                            outside_text_results[idx][0][3]
+                                            raw_outside_text_results[idx][0][3]
                                             for idx in mask_indices
                                         ]
                                     )
@@ -1405,6 +1501,8 @@ def finish_outside_text_work(
                             and oy0 is not None
                         ):
                             p_x0, p_y0, p_x1, p_y1 = ox0, oy0, ox1, oy1
+                        elif original_bbox_dict:
+                            p_x0, p_y0, p_x1, p_y1 = ox, oy, ox + ow, oy + oh
                         else:
                             # Full mask fill fallback
                             mask_pil = Image.fromarray(
@@ -1415,22 +1513,79 @@ def finish_outside_text_work(
                             return new_img
 
                         if p_x1 > p_x0 and p_y1 > p_y0:
-                            # Create a solid rectangle mask for the expanded bounds, but exclude speech bubbles
+                            box_w = p_x1 - p_x0
+                            box_h = p_y1 - p_y0
+                            char_dim = min(box_w, box_h)
+                            # Dynamic padding: scale with character height/width, not fixed
+                            target_pad = max(2, min(12, int(round(char_dim * 0.06))))
+
+                            # Obstacle-aware probe: avoid expanding into dark panel borders or line art
+                            img_arr = np.array(current_image.convert("L"))
+                            is_light_bg = (sum(color_to_use) / 3.0) > 128.0
+
+                            def is_obstacle(val):
+                                return (val < 70) if is_light_bg else (val > 185)
+
+                            pad_top = 0
+                            for step in range(1, target_pad + 1):
+                                test_y = p_y0 - step
+                                if test_y < 0:
+                                    break
+                                row_slice = img_arr[test_y, p_x0:p_x1]
+                                if np.any(is_obstacle(row_slice)):
+                                    break
+                                pad_top = step
+
+                            pad_bottom = 0
+                            for step in range(1, target_pad + 1):
+                                test_y = p_y1 + step - 1
+                                if test_y >= img_h:
+                                    break
+                                row_slice = img_arr[test_y, p_x0:p_x1]
+                                if np.any(is_obstacle(row_slice)):
+                                    break
+                                pad_bottom = step
+
+                            pad_left = 0
+                            for step in range(1, target_pad + 1):
+                                test_x = p_x0 - step
+                                if test_x < 0:
+                                    break
+                                col_slice = img_arr[p_y0 - pad_top : p_y1 + pad_bottom, test_x]
+                                if np.any(is_obstacle(col_slice)):
+                                    break
+                                pad_left = step
+
+                            pad_right = 0
+                            for step in range(1, target_pad + 1):
+                                test_x = p_x1 + step - 1
+                                if test_x >= img_w:
+                                    break
+                                col_slice = img_arr[p_y0 - pad_top : p_y1 + pad_bottom, test_x]
+                                if np.any(is_obstacle(col_slice)):
+                                    break
+                                pad_right = step
+
+                            fill_x0 = max(0, p_x0 - pad_left)
+                            fill_y0 = max(0, p_y0 - pad_top)
+                            fill_x1 = min(img_w, p_x1 + pad_right)
+                            fill_y1 = min(img_h, p_y1 + pad_bottom)
+
                             rect_mask = np.zeros((img_h, img_w), dtype=bool)
-                            rect_mask[p_y0:p_y1, p_x0:p_x1] = True
+                            rect_mask[fill_y0:fill_y1, fill_x0:fill_x1] = True
                             rect_mask = np.logical_and(
                                 rect_mask, np.logical_not(total_bubble_mask)
                             )
 
-                            region_mask = rect_mask[p_y0:p_y1, p_x0:p_x1]
+                            region_mask = rect_mask[fill_y0:fill_y1, fill_x0:fill_x1]
                             if np.any(region_mask):
                                 mask_pil = Image.fromarray(
                                     (region_mask * 255).astype(np.uint8), mode="L"
                                 )
                                 patch = Image.new(
-                                    "RGB", (p_x1 - p_x0, p_y1 - p_y0), color_to_use
+                                    "RGB", (fill_x1 - fill_x0, fill_y1 - fill_y0), color_to_use
                                 )
-                                new_img.paste(patch, (p_x0, p_y0), mask=mask_pil)
+                                new_img.paste(patch, (fill_x0, fill_y0), mask=mask_pil)
 
                         return new_img
 

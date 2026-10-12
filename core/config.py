@@ -96,6 +96,8 @@ class TranslationConfig:
     special_instructions: Optional[str] = None
     ocr_method: str = "LLM"  # "LLM", "manga-ocr", or "paddleocr-vl-1.6"
     request_coordinator: Optional[Any] = None
+    manual_json_translation: bool = False  # When True, export/import JSON file for manual translation editing
+    manual_translation_text: str = ""  # Temporary in-memory translation editing content
 
 
 @dataclass
@@ -119,6 +121,8 @@ class RenderingConfig:
     detach_trailing_punctuation: bool = True
     auto_vertical_text: bool = False
     vertical_line_spacing_mult: float = 1.0
+    auto_rotate_text: bool = True
+    auto_rotate_confidence_threshold: float = 0.5
     vertical_font_size_mult: float = 1.0
 
 
@@ -134,9 +138,11 @@ class OutsideTextConfig:
     seed: int = 1  # -1 = random
     huggingface_token: str = ""  # Required for Flux Kontext model downloads
     inpainting_method: str = (
-        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_kontext, opencv, none
+        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_dev, sd_inpainting, flux_kontext, opencv, none
     )
-    flux_backend: str = "sdnq"  # "sdcpp", "sdnq", "nunchaku" (Kontext only)
+    flux_backend: str = "sdnq"  # "sdcpp", "sdnq", "nunchaku" (Kontext only), "cloudflare", "remote_colab"
+    cloudflare_accounts: str = ""  # Multi-line ACCOUNT_ID:API_TOKEN for Cloudflare Workers AI
+    colab_server_url: str = ""  # URL of remote Colab inpainting server (e.g. https://xxx.trycloudflare.com)
     flux_low_vram: bool = False  # Use CPU offload for SDNQ
     flux_sdcpp_cache_mode: str = "none"
     flux_sdcpp_diffusion_quant: str = "Q4_K_M"
@@ -171,6 +177,10 @@ class OutsideTextConfig:
     text_box_proximity_ratio: float = 0.02  # 2% of image dimension
     flux_guidance_scale: float = 2.5
     flux_prompt: str = "Remove all text."
+    osb_follow_tilt: bool = True
+    osb_max_tilt_deg: float = 20.0
+    osb_min_tilt_deg: float = 3.0
+    osb_tilt_confidence_threshold: float = 0.5
 
 
 @dataclass

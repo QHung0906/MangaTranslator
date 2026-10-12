@@ -866,6 +866,54 @@ def _build_generation_config(
         raise TranslationError(f"Unknown provider for generation config: {provider}")
 
 
+_CURRENT_API_KEY_INDEX = 0
+_API_KEY_LOCK = __import__("threading").Lock()
+
+
+def _load_api_keys_from_file() -> List[str]:
+    import os
+    if os.path.exists("API.txt"):
+        try:
+            with open("API.txt", "r", encoding="utf-8") as f:
+                return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+        except Exception as e:
+            log_message(f"Error reading API.txt: {e}")
+    return []
+
+
+def _get_api_key_candidates(config: TranslationConfig, provider: str) -> List[str]:
+    if provider == "Google":
+        txt_keys = _load_api_keys_from_file()
+        if txt_keys:
+            return txt_keys
+        return [config.google_api_key] if config.google_api_key else []
+    elif provider == "OpenAI":
+        return [config.openai_api_key] if config.openai_api_key else []
+    elif provider == "Anthropic":
+        return [config.anthropic_api_key] if config.anthropic_api_key else []
+    elif provider == "SpaceXAI":
+        return [config.xai_api_key] if config.xai_api_key else []
+    elif provider == "DeepSeek":
+        return [config.deepseek_api_key] if config.deepseek_api_key else []
+    elif provider == "Z.ai":
+        return [config.zai_api_key] if config.zai_api_key else []
+    elif provider == "Moonshot AI":
+        return [config.moonshot_api_key] if config.moonshot_api_key else []
+    elif provider == "Xiaomi MiMo":
+        return [config.mimo_api_key] if config.mimo_api_key else []
+    elif provider == "QwenCloud":
+        return [config.qwencloud_api_key] if config.qwencloud_api_key else []
+    elif provider == "Meta Model":
+        return [config.meta_api_key] if config.meta_api_key else []
+    elif provider == "OpenCode":
+        return [config.opencode_api_key] if config.opencode_api_key else []
+    elif provider == "OpenRouter":
+        return [config.openrouter_api_key] if config.openrouter_api_key else []
+    elif provider == "OpenAI-Compatible":
+        return [config.openai_compatible_api_key] if config.openai_compatible_api_key else [""]
+    return []
+
+
 def _call_llm_endpoint(
     config: TranslationConfig,
     parts: List[Dict[str, Any]],
@@ -874,7 +922,8 @@ def _call_llm_endpoint(
     system_prompt: Optional[str] = None,
     prompt_cache_key: Optional[str] = None,
 ) -> Optional[str]:
-    """Internal helper to dispatch API calls based on provider."""
+    """Internal helper to dispatch API calls based on provider with key rotation."""
+    global _CURRENT_API_KEY_INDEX, _API_KEY_LOCK
     provider = config.provider
     model_name = config.model_name
     api_parts = parts + [{"text": prompt_text}]
@@ -890,226 +939,306 @@ def _call_llm_endpoint(
             prompt_cache_key,
         )
 
-    try:
-        if provider == "Google":
-            api_key = config.google_api_key
-            if not api_key:
-                raise TranslationError("Google API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_gemini_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-                enable_code_execution=config.enable_code_execution,
-            )
-        elif provider == "OpenAI":
-            api_key = config.openai_api_key
-            if not api_key:
-                raise TranslationError("OpenAI API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_openai_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "Anthropic":
-            api_key = config.anthropic_api_key
-            if not api_key:
-                raise TranslationError("Anthropic API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_anthropic_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "SpaceXAI":
-            api_key = config.xai_api_key
-            if not api_key:
-                raise TranslationError("SpaceXAI API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug, prompt_cache_key=prompt_cache_key
-            )
-            return call_xai_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "DeepSeek":
-            api_key = config.deepseek_api_key
-            if not api_key:
-                raise TranslationError("DeepSeek API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_deepseek_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "Z.ai":
-            api_key = config.zai_api_key
-            if not api_key:
-                raise TranslationError("Z.ai API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_zai_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "Moonshot AI":
-            api_key = config.moonshot_api_key
-            if not api_key:
-                raise TranslationError("Moonshot API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_moonshot_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "Xiaomi MiMo":
-            api_key = config.mimo_api_key
-            if not api_key:
-                raise TranslationError("MiMo API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_mimo_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "QwenCloud":
-            api_key = config.qwencloud_api_key
-            if not api_key:
-                raise TranslationError("QwenCloud API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_qwencloud_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "Meta Model":
-            api_key = config.meta_api_key
-            if not api_key:
-                raise TranslationError("Meta Model API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_meta_model_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "OpenCode":
-            api_key = config.opencode_api_key
-            if not api_key:
-                raise TranslationError("OpenCode API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            tier = getattr(config, "opencode_tier", "zen") or "zen"
-            return call_opencode_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                tier=tier,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "OpenRouter":
-            api_key = config.openrouter_api_key
-            if not api_key:
-                raise TranslationError("OpenRouter API key is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_openrouter_endpoint(
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-                enable_web_search=config.enable_web_search,
-            )
-        elif provider == "OpenAI-Compatible":
-            base_url = config.openai_compatible_url
-            api_key = config.openai_compatible_api_key  # Optional
-            if not base_url:
-                raise TranslationError("OpenAI-Compatible URL is missing.")
-            generation_config = _build_generation_config(
-                provider, model_name, config, debug
-            )
-            return call_openai_compatible_endpoint(
-                base_url=base_url,
-                api_key=api_key,
-                model_name=model_name,
-                parts=api_parts,
-                generation_config=generation_config,
-                system_prompt=system_prompt,
-                debug=debug,
-            )
-        else:
-            raise TranslationError(
-                f"Unknown translation provider specified: {provider}"
-            )
+    candidates = _get_api_key_candidates(config, provider)
+    if not candidates:
+        raise TranslationError(f"No API key available for provider {provider}.")
 
-    except (ValueError, RuntimeError):
-        raise
+    num_candidates = len(candidates)
+    with _API_KEY_LOCK:
+        start_idx = _CURRENT_API_KEY_INDEX % num_candidates
+
+    last_error = None
+    rate_limited_count = 0
+    shortest_retry_info = None  # (retry_seconds, key_index)
+    for attempt in range(num_candidates):
+        idx = (start_idx + attempt) % num_candidates
+        api_key = candidates[idx]
+        
+        # Mask the key for logs to protect user privacy
+        masked_key = (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else "..."
+        log_message(f"[{provider}] Trying API key index {idx} ({masked_key})...", always_print=True)
+
+        try:
+            if provider == "Google":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_gemini_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                    enable_code_execution=config.enable_code_execution,
+                )
+            elif provider == "OpenAI":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_openai_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "Anthropic":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_anthropic_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "SpaceXAI":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug, prompt_cache_key=prompt_cache_key
+                )
+                res = call_xai_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "DeepSeek":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_deepseek_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "Z.ai":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_zai_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "Moonshot AI":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_moonshot_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "Xiaomi MiMo":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_mimo_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "QwenCloud":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_qwencloud_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "Meta Model":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_meta_model_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "OpenCode":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                tier = getattr(config, "opencode_tier", "zen") or "zen"
+                res = call_opencode_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    tier=tier,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "OpenRouter":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_openrouter_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                )
+            elif provider == "OpenAI-Compatible":
+                base_url = config.openai_compatible_url
+                if not base_url:
+                    raise TranslationError("OpenAI-Compatible URL is missing.")
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_openai_compatible_endpoint(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                )
+            else:
+                raise TranslationError(
+                    f"Unknown translation provider specified: {provider}"
+                )
+
+            if res is None:
+                raise TranslationError("API call returned None.")
+            if res == "":
+                raise TranslationError("API call returned empty response.")
+
+            # Successful: advance to next key for the following request (round-robin)
+            with _API_KEY_LOCK:
+                _CURRENT_API_KEY_INDEX = (idx + 1) % num_candidates
+            return res
+
+        except TranslationError as e:
+            err_str = str(e)
+            # These reasons mean the CONTENT itself is blocked — rotating keys will not help.
+            _CONTENT_BLOCK_SIGNALS = (
+                "PROHIBITED_CONTENT",
+                "SAFETY",
+                "Prompt blocked",
+                "No candidates",
+            )
+            if any(sig in err_str for sig in _CONTENT_BLOCK_SIGNALS):
+                log_message(
+                    f"[{provider}] Content blocked by safety filter ({err_str}). "
+                    "Key rotation skipped — this content will be blocked by all keys.",
+                    always_print=True,
+                )
+                raise
+
+            # Track rate-limited keys to potentially wait-and-retry
+            if "429" in err_str or "rate limit" in err_str.lower() or "RESOURCE_EXHAUSTED" in err_str:
+                rate_limited_count += 1
+                # Try to extract "retry in X.XXs" from the error
+                import re
+                retry_match = re.search(r"retry in (\d+(?:\.\d+)?)s", err_str, re.IGNORECASE)
+                if retry_match:
+                    retry_secs = float(retry_match.group(1))
+                    if shortest_retry_info is None or retry_secs < shortest_retry_info[0]:
+                        shortest_retry_info = (retry_secs, idx)
+
+            log_message(f"[{provider}] API key index {idx} failed: {e}", always_print=True)
+            # Advance index so the next call starts from the next key
+            with _API_KEY_LOCK:
+                _CURRENT_API_KEY_INDEX = (idx + 1) % num_candidates
+            last_error = e
+        except Exception as e:
+            log_message(f"[{provider}] API key index {idx} failed: {e}", always_print=True)
+            with _API_KEY_LOCK:
+                _CURRENT_API_KEY_INDEX = (idx + 1) % num_candidates
+            last_error = e
+
+    # If ALL keys were rate-limited and we have a retry hint, wait and try once more
+    if rate_limited_count == num_candidates and shortest_retry_info is not None:
+        wait_secs, retry_idx = shortest_retry_info
+        wait_secs = min(wait_secs + 1.0, 60.0)  # cap at 60s, add 1s buffer
+        api_key = candidates[retry_idx]
+        masked_key = (api_key[:4] + "..." + api_key[-4:]) if len(api_key) > 8 else "..."
+        log_message(
+            f"[{provider}] All {num_candidates} keys rate-limited. "
+            f"Waiting {wait_secs:.0f}s then retrying key index {retry_idx} ({masked_key})...",
+            always_print=True,
+        )
+        import time
+        time.sleep(wait_secs)
+
+        try:
+            if provider == "Google":
+                generation_config = _build_generation_config(
+                    provider, model_name, config, debug
+                )
+                res = call_gemini_endpoint(
+                    api_key=api_key,
+                    model_name=model_name,
+                    parts=api_parts,
+                    generation_config=generation_config,
+                    system_prompt=system_prompt,
+                    debug=debug,
+                    enable_web_search=config.enable_web_search,
+                    enable_code_execution=config.enable_code_execution,
+                )
+            else:
+                # For non-Google providers, just re-raise the last error
+                if last_error is not None:
+                    raise last_error
+                else:
+                    raise TranslationError(f"API call failed for {provider} during wait-and-retry.")
+
+            if res is None:
+                raise TranslationError("API call returned None after wait-and-retry.")
+            if res == "":
+                raise TranslationError("API call returned empty response after wait-and-retry.")
+
+            with _API_KEY_LOCK:
+                _CURRENT_API_KEY_INDEX = (retry_idx + 1) % num_candidates
+            return res
+        except Exception as e:
+            log_message(f"[{provider}] Wait-and-retry also failed: {e}", always_print=True)
+            last_error = e
+
+    if last_error:
+        raise last_error
+    raise TranslationError(f"All API keys for {provider} failed.")
 
 
 def _parse_llm_response_unified(
@@ -1135,7 +1264,7 @@ def _parse_llm_response_unified(
 
         # Pattern matches "1: text" or "1. text" or "1 text" etc.
         pattern = re.compile(
-            r'^\s*(\d+)\s*[:.]\s*"?\s*(.*?)\s*"?\s*(?=\s*\n\s*\d+\s*[:.]|\s*$)',
+            r'^\s*(\d+)\s*[:.]\s*"?\s*(.*?)\s*"?\s*(?=\s*\n\s*\d+\s*[:.]|\s*\Z)',
             re.MULTILINE | re.DOTALL,
         )
 
@@ -1287,6 +1416,97 @@ def _format_previous_context_texts(
     )
 
 
+HARDCODED_VIETNAMESE_INSTRUCTIONS = """CHARACTER CONTEXT:
+- The tone may be explicit/vulgar. Use vulgar Vietnamese equivalents, not euphemisms, when context demands it.
+
+---
+
+GLOSSARY (mandatory — no exceptions):
+The terms below are Japanese source terms. Always replace them with the specified Vietnamese output.
+| Japanese source | Vietnamese output |
+|---|---|
+| おチンチン / チンチン / おちんちん | cặc / con cặc (vulgar) — dương vật (neutral) |
+| おまんこ / まんこ / マンコ | lồn/ cái lồn (vulgar) — âm đạo (neutral) |
+| うんちする穴 / アナル / アヌス / 肛門 | lỗ đít (vulgar) — hậu môn (neutral) |
+| 子宮 | tử cung |
+| 交尾 | làm tình (casual) — giao phối (clinical) |
+|死者| đi chết đi |
+|ディルド| dương vật giả(casual) — cặc giả (vulgar)|
+Default to the VULGAR column when the scene is explicitly sexual.
+
+
+---
+
+HONORIFICS (mandatory):
+ONLY preserve honorific suffixes that are explicitly present in the original Japanese source text.
+Do NOT add, infer, or insert any honorific that does not appear in the source.
+
+If the source contains a honorific, keep it attached to the name as-is:
+
+| Suffix | Output form |
+|---|---|
+| さん / -san | -san |
+| ちゃん / -chan | -chan |
+| 様 / さま / -sama | -sama |
+| 君 / くん / -kun | -kun |
+| 先輩 / -senpai | -senpai |
+| 先生 / -sensei | -sensei |
+|主さま|Chủ nhân|
+Example:
+- 田中さん → Tanaka-san ✅
+- 田中 → Tanaka (no suffix added) ✅
+- 田中 → Tanaka-san ❌ (suffix not in source — forbidden)
+- お兄さん→　Onii-san
+- 主さま→　Chủ nhân
+---
+
+PRONOUNS (mandatory — applies to all characters):
+Do NOT use "tao", "mày", "tau", "bay" in any form (uppercase or lowercase).
+Choose pronouns based on the character's relationship and social register.
+
+| Context | First person (I) | Second person (you) |
+|---|---|---|
+| Adult male → younger female | chú / anh | cháu / em |
+| Young female → adult male | cháu / em | chú / anh |
+| Rough / aggressive character | ta | ngươi |
+| Neutral / unknown | tôi/ Mình | Cậu |
+
+When relationship is unclear, default to: Mình (I) and Cậu (you).
+
+---
+
+FORBIDDEN OUTPUT TERMS — never appear in translation output, in any form:
+- cậu nhỏ, của quý, chim (as euphemism for penis)
+- lỗ ỉa, lỗ cứt (as terms for anus)
+- tao, mày, tau, bay (as pronouns)
+- cái cặc
+---
+
+FORMATTING RULES:
+- Do NOT add explanatory parentheses like "(nghĩa là...)" or "(tức là...)".
+- Translate only. Do not add notes or commentary.
+- Output format must match input format exactly.
+you see this J○ this mean JK so use should translate nữ sinh
+when you see a heart use this heart ♡
+3: お兄ちゃんの嘘つき♡ ヒソ ヒソ ヒソ ヒソ to Anh trai nói dối♡, don't translate the　ヒソ ヒソ ヒソ ヒソ
+dont translate ぼそ ぼそ ぼそ, dont translate w as lol or kkk
+when you see teach or teacher just translate sensei, it's will be much better"""
+
+
+def _get_effective_special_instructions(
+    output_language: str,
+    special_instructions: Optional[str],
+) -> Optional[str]:
+    """Combine hardcoded translation rules for Vietnamese with user-provided special instructions."""
+    is_vi = output_language and output_language.lower() in ("vietnamese", "vi")
+    if is_vi:
+        base = HARDCODED_VIETNAMESE_INSTRUCTIONS
+        if special_instructions and special_instructions.strip():
+            return base + "\n\n" + special_instructions.strip()
+        return base
+    return special_instructions
+
+
 def _format_special_instructions(config: TranslationConfig) -> str:
     """Format user's special instructions section for prompts.
 
@@ -1296,11 +1516,12 @@ def _format_special_instructions(config: TranslationConfig) -> str:
     Returns:
         Formatted special instructions string (empty if none)
     """
-    if config.special_instructions and config.special_instructions.strip():
+    effective = _get_effective_special_instructions(config.output_language, config.special_instructions)
+    if effective and effective.strip():
         return f"""
 
 ## SPECIAL INSTRUCTIONS
-{config.special_instructions.strip()}
+{effective.strip()}
 """
     return ""
 
@@ -1929,7 +2150,7 @@ The target language is {output_language}. Use the appropriate translation approa
                 )
                 translation_system = _build_rosetta_instruction(
                     output_language,
-                    config.special_instructions,
+                    _get_effective_special_instructions(output_language, config.special_instructions),
                 )
                 translation_prompt = _build_rosetta_source_prompt(formatted_texts)
                 translation_parts = []  # text-only model, no image parts
@@ -2070,9 +2291,38 @@ For each image, you must perform two steps:
             ocr_texts = []
             for line in raw_lines:
                 if "||" in line:
-                    parts = line.split("||", 1)
-                    ocr_texts.append(parts[0].strip())
-                    translations.append(parts[1].strip())
+                    sub_lines = [
+                        sl.strip()
+                        for sl in line.splitlines()
+                        if sl.strip() and not re.match(r"^[-=_~`*]{3,}$", sl.strip())
+                    ]
+                    if len(sub_lines) > 1 and any("||" in sl for sl in sub_lines):
+                        sub_ocrs = []
+                        sub_trans = []
+                        seen_pipe = False
+                        for sl in sub_lines:
+                            if "||" in sl:
+                                parts = sl.split("||", 1)
+                                if parts[0].strip():
+                                    sub_ocrs.append(parts[0].strip())
+                                if parts[1].strip():
+                                    sub_trans.append(parts[1].strip())
+                                seen_pipe = True
+                            else:
+                                if not seen_pipe:
+                                    sub_ocrs.append(sl.strip())
+                                else:
+                                    sub_trans.append(sl.strip())
+                        ocr_texts.append(" ".join(sub_ocrs))
+                        clean_trans = [
+                            t for t in sub_trans if not re.match(r"^[-=_~`*]{3,}$", t.strip())
+                        ]
+                        translations.append("\n".join(clean_trans))
+                    else:
+                        parts = line.split("||", 1)
+                        ocr_texts.append(parts[0].strip())
+                        clean_t = re.sub(r"\n\s*[-=_~`*]{3,}\s*$", "", parts[1].strip()).strip()
+                        translations.append(clean_t)
                 else:
                     # Model violated the format — keep the line as the translation
                     # and mark OCR as failed so it isn't reused as prior context.
@@ -2157,6 +2407,16 @@ def prepare_bubble_images_for_translation(
             always_print=True,
         )
 
+    img_h, img_w = original_cv_image.shape[:2]
+    proc_scale = (img_w * img_h / 1_000_000.0) ** 0.5
+    # Dynamic dilation kernel size based on resolution (bridges cleaning erosion margin)
+    dilate_k_size = max(25, int(round(28 * proc_scale)))
+    if dilate_k_size % 2 == 0:
+        dilate_k_size += 1
+    dilate_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (dilate_k_size, dilate_k_size)
+    )
+
     for bubble in bubble_data:
         prepared_bubble = bubble.copy()
         x1, y1, x2, y2 = bubble["bbox"]
@@ -2180,30 +2440,59 @@ def prepare_bubble_images_for_translation(
 
         bubble_image_cv = original_cv_image[y1:y2, x1:x2].copy()
 
-        # White-out conjoined neighbor text regions visible in this crop
-        neighbor_bboxes = bubble.get("conjoined_neighbor_bboxes")
-        if whiteout_conjoined_bubbles and neighbor_bboxes:
+        # White-out neighbor text regions visible in this crop
+        if whiteout_conjoined_bubbles:
             own_mask_crop = (
                 _ma[y1:y2, x1:x2] > 0 if (_ma is not None and _ma.ndim == 2) else None
             )
 
-            for nb in neighbor_bboxes:
-                nb_tuple = tuple(int(round(v)) for v in nb)
-                neighbor_mask = mask_lookup.get(nb_tuple)
+            # Check all other bubbles on the page for overlap with this crop
+            for other_b in bubble_data:
+                if other_b is bubble:
+                    continue
+
+                ox1, oy1, ox2, oy2 = other_b["bbox"]
+                # Bounding box intersection check
+                if ox1 >= x2 or ox2 <= x1 or oy1 >= y2 or oy2 <= y1:
+                    continue
+
+                neighbor_mask = other_b.get("sam_mask")
+                if neighbor_mask is None:
+                    nb_tuple = tuple(int(round(v)) for v in other_b["bbox"])
+                    neighbor_mask = mask_lookup.get(nb_tuple)
 
                 if neighbor_mask is not None:
                     _nm = np.asarray(neighbor_mask)
                     if _nm.ndim == 3:
                         _nm = _nm[..., 0]
                     if _nm.ndim == 2:
-                        nm_crop = _nm[y1:y2, x1:x2] > 0
+                        nm_crop = (_nm[y1:y2, x1:x2] > 0).astype(np.uint8)
+                        if np.any(nm_crop):
+                            # Dilate neighbor mask lightly to swallow ink at bubble boundaries
+                            dilated_nm = (
+                                cv2.dilate(nm_crop, dilate_kernel, iterations=1) > 0
+                            )
 
+                            if own_mask_crop is not None:
+                                region_mask = dilated_nm & ~own_mask_crop
+                            else:
+                                region_mask = dilated_nm
+
+                            # Apply whiteout precisely on neighbor's mask pixels
+                            bubble_image_cv[region_mask] = 255
+                else:
+                    # Fallback if neighbor has no mask: use intersecting rectangle
+                    ix1 = max(x1, ox1) - x1
+                    iy1 = max(y1, oy1) - y1
+                    ix2 = min(x2, ox2) - x1
+                    iy2 = min(y2, oy2) - y1
+                    if ix2 > ix1 and iy2 > iy1:
+                        rect_mask = np.zeros(bubble_image_cv.shape[:2], dtype=bool)
+                        rect_mask[iy1:iy2, ix1:ix2] = True
                         if own_mask_crop is not None:
-                            region_mask = nm_crop & ~own_mask_crop
+                            region_mask = rect_mask & ~own_mask_crop
                         else:
-                            region_mask = nm_crop
-
-                        # Apply whiteout precisely on neighbor's mask pixels
+                            region_mask = rect_mask
                         bubble_image_cv[region_mask] = 255
 
         bubble_image_pil = cv2_to_pil(bubble_image_cv)

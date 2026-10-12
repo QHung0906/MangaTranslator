@@ -2,6 +2,42 @@
 
 ## MangaTranslator
 
+> [!NOTE]
+> **Fork & Attribution Notice**: This repository is a customized and significantly enhanced fork of the original [meangrinch/MangaTranslator](https://github.com/meangrinch/MangaTranslator) by [meangrinch](https://github.com/meangrinch). All upstream licenses and intellectual property are fully respected and preserved under the [Apache-2.0 License](LICENSE).
+>
+> **Major Enhancements & Custom Features developed by [@QHung0906](https://github.com/QHung0906)**:
+> 
+> 1.  **Remote Colab T4 GPU Inpainting Server**:
+>    - Offload heavy inpainting computation to a free Google Colab Tesla T4 GPU instance via zero-config Cloudflare Tunnel (`pycloudflared`).
+>    - Keeps local computers cool, saves storage, and prevents local VRAM/system RAM exhaustion.
+>    - 1-click execution notebook ([colab_inpainting_server.ipynb](colab_inpainting_server.ipynb)) with built-in real-time connection tester in the Web UI.
+> 
+> 2.  **Cloudflare Workers AI Serverless Inpainting (Multi-Account)**:
+>    - Leverages Cloudflare's free serverless AI tier (10,000 Neurons/day).
+>    - Automatic multi-account round-robin rotation (`ACCOUNT_ID:API_TOKEN`) to seamlessly scale past daily quotas.
+>    - Intelligent error handling with automatic fallback to OpenCV on flagged content or rate limits.
+> 
+> 3.  **Computer Vision OSB Tilt Detection & Oriented Rendering**:
+>    - Advanced PCA (Principal Component Analysis) and Oriented Bounding Box (OBB) algorithm (`core/image/tilt_detection.py`).
+>    - Accurately detects angle, slant, and elongation for outside-bubble text and sound effects (SFX).
+>    - Dynamically rotates and renders translated text along the natural slant of the original artwork.
+> 
+> 4.  **Variable Font Engine (`fvar` Table) & Typography**:
+>    - Full OpenType Variable Font support (`fvar` axis table) with dynamic weight and width interpolation (`core/text/font_manager.py`).
+>    - High-performance font feature caching and glyph-level fallback for complex diacritics and Asian typography.
+> 
+> 5.  **Manual Translation Editor & Two-Phase Pipeline**:
+>    - Interactive translation mode (`manual_json_translation`): extract OCR metadata to temporary JSON -> review/edit in text editor (`[Original] || [Translated]`) -> render.
+>    - Allows fine-tuning translations without re-running entire detection or inpainting passes.
+> 
+> 6.  **Smart AI Session Manager & Batch Translation Parser**:
+>    - Dedicated AI session manager (`core/services/gemini_session_manager.py`) with customizable context prompts, honorifics analysis, and symbol/onomatopoeia filtering.
+>    - Two-way parser (`core/services/batch_translation_parser.py`) for synchronizing AI chat responses with the manual batch editor.
+> 
+> 7.  **Synchronized Gradio Web UI**:
+>    - Redesigned and responsive backend controls matching active inpainting modes.
+>    - Live Colab tunnel ping tester, retry options, and enhanced batch progress tracking.
+
 Gradio-based web application for automating the translation of manga/comic page images using AI. Targets speech bubbles and text outside of speech bubbles. Supports 60 languages and custom font pack usage.
 
 <div align="left">
@@ -268,7 +304,8 @@ pip install -r requirements.txt  # Or activate venv first if present
 ## License & credits
 
 - License: Apache-2.0 (see [LICENSE](LICENSE))
-- Author: [grinnch](https://github.com/meangrinch)
+- Original Author: [meangrinch](https://github.com/meangrinch)
+- Fork Customizations: [QHung0906](https://github.com/QHung0906)
 <details>
 <summary><b>ML Models & Libraries</b></summary>
 

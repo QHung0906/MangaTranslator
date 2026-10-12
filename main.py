@@ -499,6 +499,19 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-auto-rotate-text",
+        dest="auto_rotate_text",
+        action="store_false",
+        help="Disable automatic rotation of translated text for tilted speech bubbles.",
+    )
+    parser.add_argument(
+        "--auto-rotate-text",
+        dest="auto_rotate_text",
+        action="store_true",
+        help="Automatically rotate translated text to match the tilt angle of tilted speech bubbles.",
+    )
+    parser.set_defaults(auto_rotate_text=True)
+    parser.add_argument(
         "--vertical-line-spacing-mult",
         type=float,
         default=1.0,
@@ -822,6 +835,13 @@ def main():
         action="store_true",
         help="Automatically stack short translated OSB text vertically when it improves layout",
     )
+    parser.add_argument(
+        "--osb-no-follow-tilt",
+        dest="osb_follow_tilt",
+        action="store_false",
+        help="Disable automatic rotation-matching for tilted OSB text",
+    )
+    parser.set_defaults(osb_follow_tilt=True)
     parser.add_argument(
         "--osb-vertical-line-spacing-mult",
         type=float,
@@ -1308,6 +1328,7 @@ def main():
             supersampling_factor=args.supersampling_factor,
             detach_trailing_punctuation=args.detach_trailing_punctuation,
             auto_vertical_text=args.auto_vertical_text,
+            auto_rotate_text=args.auto_rotate_text,
             vertical_line_spacing_mult=args.vertical_line_spacing_mult,
             vertical_font_size_mult=args.vertical_font_size_mult,
         ),
@@ -1362,6 +1383,7 @@ def main():
                 args.osb_render_expansion_area_threshold
             ),
             text_box_proximity_ratio=args.osb_text_box_proximity_ratio,
+            osb_follow_tilt=args.osb_follow_tilt,
         ),
         preprocessing=PreprocessingConfig(
             enabled=args.image_upscale_mode == "initial",

@@ -1444,7 +1444,11 @@ def detect_speech_bubbles(
                     _, secondary_idx = secondary_sources[i]
                     cls_id = int(secondary_cls[secondary_idx])
                     if text_free_id is not None and cls_id == text_free_id:
-                        text_free_boxes.append(s_box.tolist())
+                        box_coords = s_box.tolist()
+                        if secondary_results.boxes.conf is not None and len(secondary_results.boxes.conf) > secondary_idx:
+                            conf_val = float(secondary_results.boxes.conf[secondary_idx].detach().cpu().item())
+                            box_coords.append(conf_val)
+                        text_free_boxes.append(box_coords)
                         continue
                     if bubble_id is None or cls_id == bubble_id:
                         filtered_boxes.append(s_box)
