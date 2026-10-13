@@ -2301,6 +2301,18 @@ def translate_and_render(
 
     # Save Output
     if output_path:
+        is_manual_template_phase = (
+            getattr(config.translation, "manual_json_translation", False)
+            and not getattr(config.translation, "manual_translation_text", None)
+            and not _manual_txt_done
+        )
+        if is_manual_template_phase:
+            log_message(
+                f"[Manual TXT] Bỏ qua lưu ảnh {image_path.name} trong giai đoạn trích xuất bản dịch mẫu.",
+                verbose=verbose,
+            )
+            return final_image_to_save
+
         if final_image_to_save.mode != target_mode:
             log_message(f"Converting final image to {target_mode}", verbose=verbose)
             final_image_to_save = final_image_to_save.convert(target_mode)

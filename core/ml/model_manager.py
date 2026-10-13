@@ -1281,6 +1281,7 @@ class ModelManager:
             )
 
             try:
+                os.environ["DIFFUSERS_SDNQ_TRANSFORMERS"] = "1"
                 from diffusers import Flux2KleinPipeline
                 from sdnq import SDNQConfig  # noqa: F401 - registers into diffusers
                 from sdnq.common import use_torch_compile as triton_is_available
@@ -1289,11 +1290,29 @@ class ModelManager:
                 hf_info = self.model_hf_repos[model_type]
                 repo_id = hf_info["repo_id"]
 
+                embed_file = (
+                    self.flux_cache_dir
+                    / "embeddings"
+                    / f"flux{variant.lower()}_manga_embeds.pt"
+                )
+                has_embeds = embed_file.exists()
+
+                load_kwargs = {
+                    "torch_dtype": self.dtype,
+                    "cache_dir": str(self.flux_cache_dir),
+                }
+                if has_embeds:
+                    log_message(
+                        f"Found precomputed embeddings at {embed_file.name}. Bypassing text encoder & tokenizer...",
+                        verbose=verbose,
+                    )
+                    load_kwargs["text_encoder"] = None
+                    load_kwargs["tokenizer"] = None
+
                 log_message(f"Loading SDNQ pipeline from {repo_id}...", verbose=verbose)
                 pipeline = Flux2KleinPipeline.from_pretrained(
                     repo_id,
-                    torch_dtype=self.dtype,
-                    cache_dir=str(self.flux_cache_dir),
+                    **load_kwargs,
                 )
 
                 # Enable INT8 MatMul for GPU acceleration (AMD, Intel ARC, NVIDIA)
@@ -1304,12 +1323,14 @@ class ModelManager:
                     log_message(
                         "Applying SDNQ INT8 MatMul optimization...", verbose=verbose
                     )
-                    pipeline.transformer = apply_sdnq_options_to_model(
-                        pipeline.transformer, use_quantized_matmul=True
-                    )
-                    pipeline.text_encoder = apply_sdnq_options_to_model(
-                        pipeline.text_encoder, use_quantized_matmul=True
-                    )
+                    if hasattr(pipeline, "transformer") and pipeline.transformer is not None:
+                        pipeline.transformer = apply_sdnq_options_to_model(
+                            pipeline.transformer, use_quantized_matmul=True
+                        )
+                    if hasattr(pipeline, "text_encoder") and pipeline.text_encoder is not None:
+                        pipeline.text_encoder = apply_sdnq_options_to_model(
+                            pipeline.text_encoder, use_quantized_matmul=True
+                        )
 
                 if low_vram:
                     log_message(

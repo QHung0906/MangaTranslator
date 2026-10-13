@@ -1138,8 +1138,13 @@ def handle_batch_click(
         import threading
 
         template_queue = queue.Queue()
+        progress_queue = queue.Queue()
+
         def _on_template_ready(fname: str, template_str: str):
             template_queue.put((fname, template_str))
+
+        def _on_batch_progress(val: float, desc: str = "Processing..."):
+            progress_queue.put((val, desc))
 
         batch_thread_exception = []
         results = {}
@@ -1152,7 +1157,7 @@ def handle_batch_click(
                     selected_font_pack_name=selected_font_pack_name,
                     models_dir=models_dir,
                     fonts_base_dir=fonts_base_dir,
-                    gradio_progress=progress,
+                    gradio_progress=_on_batch_progress,
                     cancellation_manager=CANCELLATION_MANAGER,
                     batch_manual_translations=parsed_batch_translations,
                     on_template_ready=_on_template_ready,
@@ -1166,18 +1171,38 @@ def handle_batch_click(
 
         collected_blocks = []
         seen_filenames = set()
+        last_progress_text = None
 
-        while t.is_alive() or not template_queue.empty():
+        while t.is_alive() or not template_queue.empty() or not progress_queue.empty():
+            got_progress = False
+            while not progress_queue.empty():
+                try:
+                    pval, pdesc = progress_queue.get_nowait()
+                    try:
+                        progress(pval, desc=pdesc)
+                    except Exception:
+                        pass
+                    last_progress_text = f"{pdesc} ({int(pval * 100)}%)"
+                    got_progress = True
+                except queue.Empty:
+                    break
+
             got_new = False
             while not template_queue.empty():
-                fname, template_str = template_queue.get_nowait()
-                if fname not in seen_filenames:
-                    seen_filenames.add(fname)
-                    collected_blocks.append(f"{fname}:\n\n{template_str}")
-                    got_new = True
+                try:
+                    fname, template_str = template_queue.get_nowait()
+                    if fname not in seen_filenames:
+                        seen_filenames.add(fname)
+                        collected_blocks.append(f"{fname}:\n\n{template_str}")
+                        got_new = True
+                except queue.Empty:
+                    break
             
             if got_new and backend_config.translation.manual_json_translation and not parsed_batch_translations:
-                yield [], _status_update("Đã sinh bản dịch mẫu cho một số ảnh trong batch..."), gr.update(value="\n\n".join(collected_blocks))
+                status_txt = last_progress_text or "Đã sinh bản dịch mẫu cho một số ảnh trong batch..."
+                yield [], _status_update(status_txt), gr.update(value="\n\n".join(collected_blocks))
+            elif got_progress and last_progress_text:
+                yield gr.update(), _status_update(last_progress_text), gr.update()
             
             time.sleep(0.15)
 
@@ -1208,6 +1233,15 @@ def handle_batch_click(
         # Collect any remaining Lần 1 manual templates if present
         batch_txt_update = gr.update()
         if backend_config.translation.manual_json_translation and not parsed_batch_translations:
+            # Lần 1: Chỉ trích xuất bản dịch mẫu, xóa thư mục output để tránh sinh folder thừa
+            if output_path and output_path.exists():
+                try:
+                    import shutil
+                    shutil.rmtree(output_path, ignore_errors=True)
+                except Exception:
+                    pass
+            gallery_images = []
+
             errors_dict = results.get("errors", {})
             for err_key, err_val in errors_dict.items():
                 if "--- CONTENT START ---" in str(err_val):
@@ -2775,6 +2809,7 @@ from core.services.batch_translation_parser import (
     extract_file_names_from_batch_manual,
     extract_ocr_blocks_for_files,
     find_problematic_lines,
+    validate_batch_translations_stats,
 )
 import os
 
@@ -2915,18 +2950,22 @@ def handle_batch_chat_auto_translate_all(
         yield hist, "", "**Cảnh báo:** Không tìm thấy file"
         return
 
-    # Lấy toàn bộ bản dịch đã có trong Chat History + Hộp dịch Batch
     combined_texts = []
     for turn in hist:
         if isinstance(turn, (list, tuple)) and len(turn) > 1 and turn[1]:
             combined_texts.append(str(turn[1]))
-    current_merged_txt = parse_chat_response_to_batch_manual("\n\n".join(combined_texts), txt_content)
 
-    # Kiểm tra thống kê các file còn thiếu câu dịch
-    _, _, missing_by_file, _ = validate_batch_translations_stats(current_merged_txt)
+    chat_text = "\n\n".join(combined_texts)
+    chat_done_files = set()
+    if chat_text.strip():
+        chat_parsed = parse_chat_response_to_batch_manual(chat_text, "")
+        _, _, missing_in_chat, _ = validate_batch_translations_stats(chat_parsed)
+        files_in_chat = extract_file_names_from_batch_manual(chat_parsed)
+        for cf in files_in_chat:
+            if cf not in missing_in_chat:
+                chat_done_files.add(cf)
 
-    # Chỉ dịch các trang thực sự còn dòng thoại chưa dịch
-    files_to_translate = [f for f in file_list if f in missing_by_file]
+    files_to_translate = [f for f in file_list if f not in chat_done_files]
     already_done_count = len(file_list) - len(files_to_translate)
 
     chunk_size = 10

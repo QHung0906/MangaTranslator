@@ -179,11 +179,10 @@ def _compute_outside_text_control_states(
         seed_update = gr.update(interactive=True)
         group_regions_update = gr.update(visible=True, interactive=True)
         upscale_update = gr.update(visible=True, interactive=is_klein)
-        lum_interactive = is_klein and bool(upscale_small_crops) and not bool(group_regions)
+        lum_interactive = is_klein
         lum_update = gr.update(
             visible=is_klein,
             interactive=lum_interactive,
-            value=lum_interactive,
         )
 
     return {
@@ -2206,39 +2205,20 @@ def create_layout(
                                     False
                                     if _is_cf
                                     else saved_settings.get(
-                                        "outside_text_flux_group_regions", False
+                                        "outside_text_flux_group_regions", True
                                     )
                                 )
                                 outside_text_flux_luminance_correction = gr.Checkbox(
-                                    value=(
-                                        saved_settings.get(
-                                            "outside_text_flux_luminance_correction",
-                                            True,
-                                        )
-                                        if not _is_klein_for_lum
-                                        else (
-                                            saved_settings.get(
-                                                "outside_text_flux_luminance_correction",
-                                                True,
-                                            )
-                                            if (
-                                                _upscale_small_crops_enabled
-                                                and not _group_flux_regions_enabled
-                                            )
-                                            else False
-                                        )
+                                    value=saved_settings.get(
+                                        "outside_text_flux_luminance_correction",
+                                        True,
                                     ),
                                     label="Luminance Correction",
                                     info=(
-                                        "Try and match generated patch brightness to surrounding context. "
-                                        "Only available for ungrouped Klein crops scaled to ~1MP."
+                                        "Try and match generated patch brightness to surrounding context and neutralize B&W chroma drift."
                                     ),
                                     visible=_is_klein_for_lum,
-                                    interactive=(
-                                        _is_klein_for_lum
-                                        and _upscale_small_crops_enabled
-                                        and not _group_flux_regions_enabled
-                                    ),
+                                    interactive=_is_klein_for_lum,
                                 )
                                 outside_text_flux_upscale_small_crops = gr.Checkbox(
                                     value=saved_settings.get(
@@ -3650,17 +3630,14 @@ def create_layout(
         def _update_luminance_interactivity(
             upscale_small_crops: bool, group_regions: bool, method: str, backend: str
         ):
-            """Luminance correction is calibrated for ungrouped ~1MP Klein crops."""
+            """Luminance correction is available for Klein crops."""
             is_klein = method in ("flux_klein_9b", "flux_klein_4b")
             if not is_klein:
                 return gr.update(interactive=False, visible=False, value=False)
 
-            effective_group = False if backend == "cloudflare" else bool(group_regions)
-            luminance_interactive = bool(upscale_small_crops) and not effective_group
             return gr.update(
                 visible=True,
-                interactive=luminance_interactive,
-                value=luminance_interactive,
+                interactive=True,
             )
 
         for control in (

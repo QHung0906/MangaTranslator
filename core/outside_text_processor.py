@@ -1,5 +1,7 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import gc
+import math
 import os
 import random
 import re
@@ -661,6 +663,171 @@ def prepare_outside_text_work(
         return None
 
 
+def cluster_flux_candidates(
+    candidates: List[Dict[str, Any]],
+    max_dim: int = 1536,
+    max_dist: int = 500,
+    max_area: int = 1_800_000,
+) -> List[List[Dict[str, Any]]]:
+    """Group spatially proximate OSB candidates into safe-sized clusters for Flux inpainting.
+
+    Prevents whole-page mega-crops that crush font resolution when scaled down,
+    while minimizing the total number of Flux inference passes.
+    """
+    if not candidates:
+        return []
+    if len(candidates) == 1:
+        return [candidates]
+
+    def get_cand_bbox(c: Dict[str, Any]) -> Tuple[int, int, int, int]:
+        if "bbox" in c and c["bbox"] is not None:
+            return c["bbox"]
+        mask = c["mask"]
+        ys, xs = np.where(mask)
+        if len(ys) == 0 or len(xs) == 0:
+            return (0, 0, 0, 0)
+        return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+
+    c_bboxes = [get_cand_bbox(c) for c in candidates]
+    clusters = [[c] for c in candidates]
+    cluster_bboxes = list(c_bboxes)
+
+    def bbox_distance(
+        b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]
+    ) -> int:
+        dx = max(0, max(b1[0], b2[0]) - min(b1[2], b2[2]))
+        dy = max(0, max(b1[1], b2[1]) - min(b1[3], b2[3]))
+        return max(dx, dy)
+
+    def merge_bboxes(
+        b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]
+    ) -> Tuple[int, int, int, int]:
+        return (
+            min(b1[0], b2[0]),
+            min(b1[1], b2[1]),
+            max(b1[2], b2[2]),
+            max(b1[3], b2[3]),
+        )
+
+    while True:
+        best_pair = None
+        best_dist = float("inf")
+
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                dist = bbox_distance(cluster_bboxes[i], cluster_bboxes[j])
+                if dist <= max_dist:
+                    merged = merge_bboxes(cluster_bboxes[i], cluster_bboxes[j])
+                    mw = merged[2] - merged[0]
+                    mh = merged[3] - merged[1]
+                    if mw <= max_dim and mh <= max_dim and mw * mh <= max_area:
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_pair = (i, j, merged)
+
+        if best_pair is None:
+            break
+
+        i, j, merged = best_pair
+        clusters[i].extend(clusters[j])
+        cluster_bboxes[i] = merged
+        del clusters[j]
+        del cluster_bboxes[j]
+
+    return clusters
+
+
+def slice_large_flux_candidate(
+    candidate: Dict[str, Any],
+    max_slice_dim: int = 1152,
+) -> List[Dict[str, Any]]:
+    """Splits an oversized OSB candidate along any axis exceeding max_slice_dim.
+
+    - If H > max_slice_dim and W <= max_slice_dim: slice vertically (1D).
+    - If W > max_slice_dim and H <= max_slice_dim: slice horizontally (1D).
+    - If both W, H > max_slice_dim: slice as a 2D grid (Nx x Ny).
+    - If both W, H <= max_slice_dim: return [candidate] intact.
+
+    Uses dynamic overlap calculated as ~8% of slice dimension (min 32px, max 160px).
+    Only returns non-empty sub-slices that contain actual text mask pixels.
+    """
+    bbox = candidate.get("bbox")
+    mask = candidate.get("mask")
+    if mask is None:
+        return [candidate]
+
+    img_h, img_w = mask.shape
+    if bbox is not None:
+        bx0, by0, bx1, by1 = bbox
+    else:
+        ys, xs = np.where(mask)
+        if len(ys) == 0 or len(xs) == 0:
+            return [candidate]
+        bx0, by0, bx1, by1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+    bw = bx1 - bx0
+    bh = by1 - by0
+
+    if bw <= max_slice_dim and bh <= max_slice_dim:
+        return [candidate]
+
+    target_step = 960
+    num_x = max(1, math.ceil(bw / target_step)) if bw > max_slice_dim else 1
+    num_y = max(1, math.ceil(bh / target_step)) if bh > max_slice_dim else 1
+
+    if num_x == 1 and num_y == 1:
+        return [candidate]
+
+    sub_candidates = []
+    base_idx = candidate.get("index", 1)
+    fallback_color = candidate.get("fallback_color", (255, 255, 255))
+
+    step_x = bw / num_x
+    step_y = bh / num_y
+
+    overlap_x = int(np.clip(round(step_x * 0.08), 32, 160)) if num_x > 1 else 0
+    overlap_y = int(np.clip(round(step_y * 0.08), 32, 160)) if num_y > 1 else 0
+
+    sub_i = 0
+    for iy in range(num_y):
+        sy0 = int(by0 + iy * step_y)
+        sy1 = int(by0 + (iy + 1) * step_y) if iy < num_y - 1 else by1
+
+        py0 = max(0, sy0 - overlap_y) if iy > 0 else sy0
+        py1 = min(img_h, sy1 + overlap_y) if iy < num_y - 1 else sy1
+
+        for ix in range(num_x):
+            sx0 = int(bx0 + ix * step_x)
+            sx1 = int(bx0 + (ix + 1) * step_x) if ix < num_x - 1 else bx1
+
+            px0 = max(0, sx0 - overlap_x) if ix > 0 else sx0
+            px1 = min(img_w, sx1 + overlap_x) if ix < num_x - 1 else sx1
+
+            sub_mask = np.zeros_like(mask)
+            sub_mask[py0:py1, px0:px1] = mask[py0:py1, px0:px1]
+
+            if not np.any(sub_mask):
+                continue
+
+            sub_ys, sub_xs = np.where(sub_mask)
+            sub_bbox = (
+                int(sub_xs.min()),
+                int(sub_ys.min()),
+                int(sub_xs.max()) + 1,
+                int(sub_ys.max()) + 1,
+            )
+
+            sub_candidates.append({
+                "index": f"{base_idx}_{sub_i + 1}",
+                "mask": sub_mask,
+                "bbox": sub_bbox,
+                "fallback_color": fallback_color,
+            })
+            sub_i += 1
+
+    return sub_candidates if sub_candidates else [candidate]
+
+
 def finish_outside_text_work(
     work: OutsideTextWork,
     skipped_bboxes: Optional[set] = None,
@@ -1057,7 +1224,7 @@ def finish_outside_text_work(
                         )
                         continue
 
-                    original_bbox_dict = group.get("original_bbox")
+                    original_bbox_dict = group.get("bbox") or group.get("original_bbox")
                     composite_clip_bbox = None
                     fill_color = None
                     fallback_fill_color = None
@@ -1629,10 +1796,24 @@ def finish_outside_text_work(
                             )
                             continue
 
+                        cand_bbox = None
+                        if composite_clip_bbox is not None:
+                            cand_bbox = composite_clip_bbox
+                        else:
+                            ys, xs = np.where(grouped_mask)
+                            if len(ys) > 0 and len(xs) > 0:
+                                cand_bbox = (
+                                    int(xs.min()),
+                                    int(ys.min()),
+                                    int(xs.max()) + 1,
+                                    int(ys.max()) + 1,
+                                )
+
                         grouped_flux_candidates.append(
                             {
                                 "index": i + 1,
                                 "mask": grouped_mask,
+                                "bbox": cand_bbox,
                                 "fallback_color": (
                                     fallback_fill_color
                                     if fallback_fill_color
@@ -1751,66 +1932,102 @@ def finish_outside_text_work(
                 flush_pending_flux_candidates()
 
                 if grouped_flux_candidates:
-                    grouped_mask = np.zeros((img_h, img_w), dtype=bool)
-                    for candidate in grouped_flux_candidates:
-                        grouped_mask = np.logical_or(grouped_mask, candidate["mask"])
-
-                    if np.any(grouped_mask):
-                        log_message(
-                            "Running grouped Flux inpainting for "
-                            f"{len(grouped_flux_candidates)} OSB regions",
-                            verbose=verbose,
+                    # 1. Adaptively slice oversized candidates along exceeding axes (1D/2D) with dynamic overlap
+                    sliced_candidates = []
+                    for cand in grouped_flux_candidates:
+                        sliced_candidates.extend(
+                            slice_large_flux_candidate(cand, max_slice_dim=1024)
                         )
-                        try:
-                            group_seed = base_seed if base_seed > 0 else base_seed
+
+                    # 2. Smart cluster into safe-sized groups (max_dim=1024, max_area=800k)
+                    clusters = cluster_flux_candidates(
+                        sliced_candidates,
+                        max_dim=1024,
+                        max_dist=300,
+                        max_area=800_000,
+                    )
+                    log_message(
+                        f"Partitioned {len(sliced_candidates)} OSB regions into {len(clusters)} smart Flux cluster(s)",
+                        verbose=verbose,
+                    )
+
+                    cluster_concurrency = 1
+
+                    for batch_start in range(0, len(clusters), cluster_concurrency):
+                        batch = list(enumerate(clusters))[batch_start : batch_start + cluster_concurrency]
+                        base_image = current_image.copy()
+
+                        def _process_single_cluster(item):
+                            c_idx, cluster = item
+                            c_mask = np.zeros((img_h, img_w), dtype=bool)
+                            for candidate in cluster:
+                                c_mask = np.logical_or(c_mask, candidate["mask"])
+
+                            if not np.any(c_mask):
+                                return c_idx, cluster, c_mask, None, None
+
+                            log_message(
+                                f"Running Flux inpainting for OSB cluster {c_idx + 1}/{len(clusters)} "
+                                f"({len(cluster)} region(s))",
+                                verbose=verbose,
+                            )
+                            cluster_seed = (
+                                base_seed + c_idx if base_seed > 0 else base_seed
+                            )
                             inpaint_kwargs = {
-                                "seed": group_seed,
+                                "seed": cluster_seed,
                                 "verbose": verbose,
                                 "strict_mask_clipping": True,
                                 "ocr_params": {
-                                    "type": "outside_text_group",
-                                    "regions": len(grouped_flux_candidates),
+                                    "type": "outside_text_cluster",
+                                    "cluster_idx": c_idx + 1,
+                                    "regions": len(cluster),
                                 },
                             }
-                            if request_coordinator is not None:
-                                inpainted_image = request_coordinator.run(
-                                    inpainter.inpaint_mask,
-                                    current_image,
-                                    grouped_mask,
+                            try:
+                                res_img = inpainter.inpaint_mask(
+                                    base_image.copy(),
+                                    c_mask,
                                     **inpaint_kwargs,
                                 )
-                            else:
-                                inpainted_image = inpainter.inpaint_mask(
-                                    current_image,
-                                    grouped_mask,
-                                    **inpaint_kwargs,
-                                )
-                            if inpainted_image is current_image:
-                                raise RuntimeError(
-                                    "Flux returned original image (no inpaint)"
-                                )
-                            current_image = inpainted_image
-                            flux_inpaints += len(grouped_flux_candidates)
-                        except Exception as e:
-                            log_message(
-                                "Grouped Flux inpainting failed "
-                                f"({e}); falling back to CV2 fill",
-                                always_print=True,
-                            )
-                            for candidate in grouped_flux_candidates:
+                                if res_img is base_image:
+                                    raise RuntimeError(
+                                        "Flux returned original image (no inpaint)"
+                                    )
+                                return c_idx, cluster, c_mask, res_img, None
+                            except Exception as e:
+                                return c_idx, cluster, c_mask, None, e
+
+                        if len(batch) == 1:
+                            batch_results = [_process_single_cluster(batch[0])]
+                        else:
+                            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                                batch_results = list(executor.map(_process_single_cluster, batch))
+
+                        for c_idx, cluster, c_mask, res_img, err in batch_results:
+                            if err is None and res_img is not None:
                                 mask_pil = Image.fromarray(
-                                    (candidate["mask"] * 255).astype(np.uint8),
-                                    mode="L",
+                                    (c_mask * 255).astype(np.uint8), mode="L"
                                 )
-                                patch = Image.new(
-                                    "RGB",
-                                    current_image.size,
-                                    candidate["fallback_color"],
+                                current_image.paste(res_img, (0, 0), mask=mask_pil)
+                                flux_inpaints += len(cluster)
+                            else:
+                                log_message(
+                                    f"Flux cluster {c_idx + 1} inpainting failed ({err}); falling back to CV2 fill",
+                                    always_print=True,
                                 )
-                                next_image = current_image.copy()
-                                next_image.paste(patch, (0, 0), mask=mask_pil)
-                                current_image = next_image
-                            cv2_inpaints += len(grouped_flux_candidates)
+                                for candidate in cluster:
+                                    mask_pil = Image.fromarray(
+                                        (candidate["mask"] * 255).astype(np.uint8),
+                                        mode="L",
+                                    )
+                                    patch = Image.new(
+                                        "RGB",
+                                        current_image.size,
+                                        candidate["fallback_color"],
+                                    )
+                                    current_image.paste(patch, (0, 0), mask=mask_pil)
+                                cv2_inpaints += len(cluster)
 
                 log_message("Outside text inpainting completed", verbose=verbose)
                 parts = [

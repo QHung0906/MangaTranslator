@@ -7,34 +7,48 @@
 >
 > **Major Enhancements & Custom Features developed by [@QHung0906](https://github.com/QHung0906)**:
 > 
-> 1.  **Remote Colab T4 GPU Inpainting Server**:
+> 1.  **Remote Colab T4 GPU Inpainting Server (High-Performance Single Worker)**:
 >    - Offload heavy inpainting computation to a free Google Colab Tesla T4 GPU instance via zero-config Cloudflare Tunnel (`pycloudflared`).
+>    - **Optimized Single Worker Architecture**: Dedicated pipeline leveraging full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4) with direct VAE decoding (tiling/slicing disabled) and auto CUDA warmup.
 >    - Keeps local computers cool, saves storage, and prevents local VRAM/system RAM exhaustion.
->    - 1-click execution notebook ([colab_inpainting_server.ipynb](colab_inpainting_server.ipynb)) with built-in real-time connection tester in the Web UI.
+>    - 1-click execution notebook provided in [colab_inpainting_server.ipynb](colab_inpainting_server.ipynb) with built-in real-time connection tester in the Web UI.
 > 
-> 2.  **Cloudflare Workers AI Serverless Inpainting (Multi-Account)**:
+> 2.  **Adaptive Slicing & Smart Clustering Inpainting**:
+>    - Intelligent proximity-based bounding box clustering and adaptive slicing (`core/outside_text_processor.py`).
+>    - Strictly bounds crop regions to $\le 1024$px, eliminating unnecessary downscaling artifacts and preserving original $1:1$ line-art detail.
+>    - Drastically improves text cleaning on textured backgrounds (cabinets, screentones, complex patterns).
+> 
+> 3.  **Precomputed Text Embeddings & Zero Text-Encoder Architecture**:
+>    - Replaces heavy text encoders (~2.8 GB disk/RAM) with precomputed prompt tensors.
+>    - **Download Embeddings (Google Drive)**:
+>      - [flux4b_manga_embeds.pt (4B)](https://drive.google.com/file/d/14LTQz8OtJBZiKP1MWIPmMjj5CAsb3Xxp/view?usp=drive_link) (~7.8 MB)
+>      - [flux9b_manga_embeds.pt (9B)](https://drive.google.com/file/d/1XdiNH4daPo0B5ECux32-OpnKWzUBN0v8/view?usp=drive_link) (~12.5 MB)
+>    - Drops pipeline initialization time from ~20s down to **~2s** while freeing **~5.64 GB** disk space and saving massive system RAM/VRAM.
+>    - Step-by-step setup and export instructions available in [docs/FLUX_EMBEDDINGS.md](docs/FLUX_EMBEDDINGS.md).
+> 
+> 4.  **Cloudflare Workers AI Serverless Inpainting (Multi-Account)**:
 >    - Leverages Cloudflare's free serverless AI tier (10,000 Neurons/day).
 >    - Automatic multi-account round-robin rotation (`ACCOUNT_ID:API_TOKEN`) to seamlessly scale past daily quotas.
 >    - Intelligent error handling with automatic fallback to OpenCV on flagged content or rate limits.
 > 
-> 3.  **Computer Vision OSB Tilt Detection & Oriented Rendering**:
+> 5.  **Computer Vision OSB Tilt Detection & Oriented Rendering**:
 >    - Advanced PCA (Principal Component Analysis) and Oriented Bounding Box (OBB) algorithm (`core/image/tilt_detection.py`).
 >    - Accurately detects angle, slant, and elongation for outside-bubble text and sound effects (SFX).
 >    - Dynamically rotates and renders translated text along the natural slant of the original artwork.
 > 
-> 4.  **Variable Font Engine (`fvar` Table) & Typography**:
+> 6.  **Variable Font Engine (`fvar` Table) & Typography**:
 >    - Full OpenType Variable Font support (`fvar` axis table) with dynamic weight and width interpolation (`core/text/font_manager.py`).
 >    - High-performance font feature caching and glyph-level fallback for complex diacritics and Asian typography.
 > 
-> 5.  **Manual Translation Editor & Two-Phase Pipeline**:
+> 7.  **Manual Translation Editor & Two-Phase Pipeline**:
 >    - Interactive translation mode (`manual_json_translation`): extract OCR metadata to temporary JSON -> review/edit in text editor (`[Original] || [Translated]`) -> render.
 >    - Allows fine-tuning translations without re-running entire detection or inpainting passes.
 > 
-> 6.  **Smart AI Session Manager & Batch Translation Parser**:
+> 8.  **Smart AI Session Manager & Batch Translation Parser**:
 >    - Dedicated AI session manager (`core/services/gemini_session_manager.py`) with customizable context prompts, honorifics analysis, and symbol/onomatopoeia filtering.
 >    - Two-way parser (`core/services/batch_translation_parser.py`) for synchronizing AI chat responses with the manual batch editor.
 > 
-> 7.  **Synchronized Gradio Web UI**:
+> 9.  **Synchronized Gradio Web UI**:
 >    - Redesigned and responsive backend controls matching active inpainting modes.
 >    - Live Colab tunnel ping tester, retry options, and enhanced batch progress tracking.
 
@@ -60,6 +74,7 @@ Gradio-based web application for automating the translation of manga/comic page 
 - [Install](#install)
 - [Post-Install Setup](#post-install-setup)
 - [Run](#run)
+- [Remote Inpainting Server (Google Colab)](#remote-inpainting-server-google-colab)
 - [Documentation](#documentation)
 - [Updating](#updating)
 - [License & Credits](#license--credits)
@@ -279,7 +294,38 @@ python main.py --input <image_path> --test-mode
 python main.py --help
 ```
 
+## Remote Inpainting Server (Google Colab)
+
+Offload speech bubble & outside-text inpainting to a free **Google Colab Tesla T4 GPU** or Kaggle environment without requiring a dedicated local GPU.
+
+### ✨ Highlights
+- **High-Performance Single Worker**: Dedicated pipeline running at full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4).
+- **Direct VAE Decoding**: VAE tiling and slicing disabled to decode 1024x1024 in a single fused pass, cutting ~3–5s per image.
+- **Zero Text-Encoder Architecture**: Bypasses the ~2.8 GB text encoder entirely via precomputed prompt embeddings (`.pt`), slashing load time to ~2 seconds and saving disk space.
+- **Auto Warmup**: Primes CUDA kernels and allocators at server startup so the very first inpaint runs at peak speed.
+- **Zero-Config Cloudflare Tunnel**: Generates a secure public URL (`https://xxxx.trycloudflare.com`) with no port forwarding required.
+
+### 📥 Precomputed Embeddings Download
+Download the precomputed `.pt` embeddings directly into Google Drive (`MyDrive/`) or upload to Colab:
+- **FLUX.2 Klein 4B**: [flux4b_manga_embeds.pt](https://drive.google.com/file/d/14LTQz8OtJBZiKP1MWIPmMjj5CAsb3Xxp/view?usp=drive_link) (~7.8 MB)
+- **FLUX.2 Klein 9B**: [flux9b_manga_embeds.pt](https://drive.google.com/file/d/1XdiNH4daPo0B5ECux32-OpnKWzUBN0v8/view?usp=drive_link) (~12.5 MB)
+
+*(For details and local extraction scripts, see [FLUX_EMBEDDINGS.md](docs/FLUX_EMBEDDINGS.md)).*
+
+### 🚀 Usage Instructions
+1. Open [`colab_inpainting_server.ipynb`](colab_inpainting_server.ipynb) on Google Colab and select **Runtime -> Change runtime type -> T4 GPU**.
+2. Run the notebook (or paste the contents of [`colab_server.py`](colab_server.py) into a cell).
+3. Copy the generated Cloudflare URL (e.g. `https://xxxx.trycloudflare.com`).
+4. In your local MangaTranslator Web UI:
+   - Go to **Settings -> Outside Text Inpainting**
+   - Inpainting Method: `Flux.2 Klein 4B`
+   - Backend: `Remote Colab`
+   - Colab Server URL: Paste your Cloudflare URL
+   - Click **Test Connection** to verify.
+
 ## Documentation
+
+- [FLUX Prompt Embeddings](docs/FLUX_EMBEDDINGS.md)
 
 - [Hardware Requirements](docs/HARDWARE_REQUIREMENTS.md)
 - [Recommended Fonts](docs/FONTS.md)

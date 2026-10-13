@@ -1138,19 +1138,43 @@ class FluxKleinInpainter:
 
     def _get_prompt_embeddings(self, device: torch.device, verbose: bool = False):
         if self._prompt_embeds_cpu is None:
-            log_message("  - Encoding Flux.2 Klein prompt embeddings", verbose=verbose)
-            prompt_embeds, pooled_prompt_embeds = _encode_flux_prompt(
-                self.pipeline, self.KLEIN_PROMPT, device
+            embed_path = (
+                self.manager.flux_cache_dir
+                / "embeddings"
+                / f"flux{self.variant.lower()}_manga_embeds.pt"
             )
-            self._prompt_embeds_cpu = _prompt_value_to_cpu(prompt_embeds)
-            self._pooled_prompt_embeds_cpu = _prompt_value_to_cpu(pooled_prompt_embeds)
+            if embed_path.exists():
+                log_message(
+                    f"  - Loading precomputed Flux.2 Klein {self.variant.upper()} prompt embeddings from {embed_path.name}",
+                    verbose=verbose,
+                )
+                loaded_embeds = torch.load(embed_path, map_location="cpu")
+                if isinstance(loaded_embeds, dict):
+                    self._prompt_embeds_cpu = loaded_embeds.get(
+                        "prompt_embeds", loaded_embeds.get("embeds")
+                    )
+                else:
+                    self._prompt_embeds_cpu = loaded_embeds
+                self._pooled_prompt_embeds_cpu = None
+            else:
+                log_message("  - Encoding Flux.2 Klein prompt embeddings", verbose=verbose)
+                prompt_embeds, pooled_prompt_embeds = _encode_flux_prompt(
+                    self.pipeline, self.KLEIN_PROMPT, device
+                )
+                self._prompt_embeds_cpu = _prompt_value_to_cpu(prompt_embeds)
+                self._pooled_prompt_embeds_cpu = _prompt_value_to_cpu(pooled_prompt_embeds)
         else:
             log_message("  - Reusing Flux.2 Klein prompt embeddings", verbose=verbose)
 
-        return (
-            _prompt_value_to_device(self._prompt_embeds_cpu, device),
-            _prompt_value_to_device(self._pooled_prompt_embeds_cpu, device),
-        )
+        embed_val = _prompt_value_to_device(self._prompt_embeds_cpu, device)
+        if isinstance(embed_val, torch.Tensor) and hasattr(self, "DTYPE") and self.DTYPE is not None:
+            embed_val = embed_val.to(dtype=self.DTYPE)
+
+        pooled_val = _prompt_value_to_device(self._pooled_prompt_embeds_cpu, device)
+        if isinstance(pooled_val, torch.Tensor) and hasattr(self, "DTYPE") and self.DTYPE is not None:
+            pooled_val = pooled_val.to(dtype=self.DTYPE)
+
+        return (embed_val, pooled_val)
 
     def _quantize_dimension(self, dim: int) -> int:
         """Quantize dimension to be a multiple of RESOLUTION_MULTIPLE within allowed range."""
