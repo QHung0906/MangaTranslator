@@ -1066,9 +1066,16 @@ class FluxKleinInpainter:
         self.cf_client = None
         if self.backend == "cloudflare":
             from core.image.cloudflare_client import CloudflareClientManager
+            from core.services.credentials import get_secure_cloudflare_accounts
+
+            accounts_text = cloudflare_accounts
+            if not accounts_text or any("•" in line for line in accounts_text.splitlines()):
+                sec_accs = get_secure_cloudflare_accounts()
+                if sec_accs:
+                    accounts_text = "\n".join(sec_accs)
 
             self.cf_client = CloudflareClientManager(
-                accounts_text=cloudflare_accounts, verbose=verbose
+                accounts_text=accounts_text, verbose=verbose
             )
 
         self.colab_server_url = colab_server_url

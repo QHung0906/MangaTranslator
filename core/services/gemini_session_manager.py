@@ -160,7 +160,7 @@ class GeminiChatSession:
 
         keys = get_shared_api_keys(self.fallback_api_key)
         if not keys:
-            raise ValueError("Không tìm thấy API Key nào trong API.txt hoặc cấu hình.")
+            raise ValueError("Không tìm thấy API Key nào trong Két sắt hoặc cấu hình.")
 
         self._cancel_requested = False
         self.history.append({"role": "user", "parts": [{"text": user_text}]})

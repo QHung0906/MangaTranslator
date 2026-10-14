@@ -304,7 +304,11 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
             huggingface_token=outside_text_huggingface_token_val,
             inpainting_method=outside_text_inpainting_method_val,
             flux_backend=outside_text_flux_backend_val,
-            cloudflare_accounts=outside_text_cloudflare_accounts_val,
+            cloudflare_accounts=(
+                "\n".join(__import__("core.services.credentials", fromlist=["get_secure_cloudflare_accounts"]).get_secure_cloudflare_accounts())
+                if (not outside_text_cloudflare_accounts_val or "•" in str(outside_text_cloudflare_accounts_val))
+                else outside_text_cloudflare_accounts_val
+            ),
             colab_server_url=outside_text_colab_server_url_val,
             flux_low_vram=outside_text_flux_low_vram_val,
             flux_sdcpp_cache_mode=outside_text_flux_sdcpp_cache_mode_val,
@@ -367,7 +371,11 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
         ),
         provider_settings=UITranslationProviderSettings(
             provider=provider_selector,
-            google_api_key=google_api_key,
+            google_api_key=(
+                "\n".join(__import__("core.services.credentials", fromlist=["get_secure_api_keys"]).get_secure_api_keys("Google"))
+                if (not google_api_key or "•" in str(google_api_key))
+                else google_api_key
+            ),
             openai_api_key=openai_api_key,
             anthropic_api_key=anthropic_api_key,
             xai_api_key=xai_api_key,
@@ -1620,9 +1628,40 @@ def handle_save_config_click(*args: Any) -> str:
         batch_previous_context_text_count=int(batch_previous_context_text_count_val),
     )
 
+    if gem_key is not None:
+        raw_lines = [l.strip() for l in str(gem_key).splitlines() if l.strip()]
+        is_masked = len(raw_lines) > 0 and all(set(l) <= {"•", "*", "."} for l in raw_lines)
+        if not is_masked:
+            from core.services.credentials import save_secure_api_keys, clear_secure_api_keys
+            import re
+
+            tokens = [
+                t.strip()
+                for t in re.split(r"[\r\n,;]+", str(gem_key))
+                if t.strip() and not t.strip().startswith("#")
+            ]
+            if tokens:
+                save_secure_api_keys(tokens, "Google")
+            else:
+                clear_secure_api_keys("Google")
+            global BATCH_GEMINI_SESSION
+            if BATCH_GEMINI_SESSION:
+                BATCH_GEMINI_SESSION.reload_keys()
+
+    if outside_text_cloudflare_accounts_val is not None:
+        raw_cf = [l.strip() for l in str(outside_text_cloudflare_accounts_val).splitlines() if l.strip()]
+        is_cf_masked = len(raw_cf) > 0 and all(set(l) <= {"•", "*", "."} for l in raw_cf)
+        if not is_cf_masked:
+            from core.services.credentials import save_secure_cloudflare_accounts, clear_secure_cloudflare_accounts
+            if raw_cf:
+                save_secure_cloudflare_accounts(str(outside_text_cloudflare_accounts_val))
+            else:
+                clear_secure_cloudflare_accounts()
+
     # Convert UI state to dictionary for saving
     settings_dict = ui_state.to_save_dict()
-    # Persist send_full_page_context from the single UI value (used for both single and batch flows).
+    settings_dict["google_api_key"] = ""
+    settings_dict["outside_text_cloudflare_accounts"] = ""
     settings_dict["send_full_page_context"] = bool(send_full_page_context_val)
     message = settings_manager.save_config(settings_dict)
     return message
@@ -1765,7 +1804,7 @@ def handle_reset_defaults_click(fonts_base_dir: Path) -> List[gr.update]:
         default_ui_state.cleaning.roi_shrink_px,
         gr.update(value=default_provider),
         gr.update(
-            value=default_ui_state.provider_settings.google_api_key,
+            value=get_masked_google_keys(),
             visible=gemini_visible,
         ),
         gr.update(
@@ -1946,7 +1985,7 @@ def handle_reset_defaults_click(fonts_base_dir: Path) -> List[gr.update]:
             ),
         ),
         default_ui_state.outside_text.flux_backend,
-        gr.update(value=default_ui_state.outside_text.cloudflare_accounts),
+        gr.update(value=get_masked_cloudflare_accounts()),
         gr.update(value=default_ui_state.outside_text.colab_server_url),
         default_ui_state.outside_text.flux_low_vram,
         default_ui_state.outside_text.flux_sdcpp_cache_mode,
@@ -2813,6 +2852,54 @@ from core.services.batch_translation_parser import (
 )
 import os
 
+def get_masked_google_keys() -> str:
+    from core.services.credentials import get_secure_api_keys
+
+    keys = get_secure_api_keys("Google")
+    if not keys:
+        return ""
+    return "\n".join(["•" * 36 for _ in keys])
+
+
+def handle_toggle_google_key(revealed: bool):
+    import gradio as gr
+    from core.services.credentials import get_secure_api_keys
+
+    keys = get_secure_api_keys("Google")
+    if not revealed:
+        return "\n".join(keys), gr.update(value="Show/Hide"), True
+    else:
+        return (
+            get_masked_google_keys(),
+            gr.update(value="Show/Hide"),
+            False,
+        )
+
+
+def get_masked_cloudflare_accounts() -> str:
+    from core.services.credentials import get_secure_cloudflare_accounts
+
+    accounts = get_secure_cloudflare_accounts()
+    if not accounts:
+        return ""
+    return "\n".join(["•" * 36 for _ in accounts])
+
+
+def handle_toggle_cloudflare_accounts(revealed: bool):
+    import gradio as gr
+    from core.services.credentials import get_secure_cloudflare_accounts
+
+    accounts = get_secure_cloudflare_accounts()
+    if not revealed:
+        return "\n".join(accounts), gr.update(value="Show/Hide"), True
+    else:
+        return (
+            get_masked_cloudflare_accounts(),
+            gr.update(value="Show/Hide"),
+            False,
+        )
+
+
 BATCH_GEMINI_SESSION: Optional[GeminiChatSession] = None
 
 
@@ -2858,7 +2945,7 @@ def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected
         session.set_model(selected_model)
 
     if not session.has_keys:
-        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        error_msg = "❌ Không tìm thấy API Key nào trong Két sắt hoặc cấu hình."
         hist = list(current_history or [])
         hist.append(("Nạp OCR", error_msg))
         yield hist, "**Lỗi:** Thiếu API Key"
@@ -2903,7 +2990,7 @@ def handle_batch_chat_send(user_msg: str, current_history: List[Any], selected_m
 
     hist = list(current_history or [])
     if not session.has_keys:
-        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        error_msg = "❌ Không tìm thấy API Key nào trong Két sắt hoặc cấu hình."
         hist.append((msg, error_msg))
         yield hist, "", "**Lỗi:** Thiếu API Key"
         return
@@ -2931,7 +3018,7 @@ def handle_batch_chat_auto_translate_all(
 
     hist = list(current_history or [])
     if not session.has_keys:
-        error_msg = "❌ Không tìm thấy API Key nào trong API.txt hoặc cấu hình."
+        error_msg = "❌ Không tìm thấy API Key nào trong Két sắt hoặc cấu hình."
         hist.append(("🚀 Tự động dịch toàn bộ", error_msg))
         yield hist, "", "**Lỗi:** Thiếu API Key"
         return

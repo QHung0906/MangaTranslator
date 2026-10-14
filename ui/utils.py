@@ -98,17 +98,46 @@ def get_available_font_packs(fonts_base_dir: Path) -> Tuple[List[str], Optional[
 
 def is_valid_google_api_key(api_key: str) -> bool:
     """Return True for legacy traffic keys (AI...) or auth keys (AQ...)."""
-    if api_key.startswith("AI") and len(api_key) == 39:
+    k = (api_key or "").strip()
+    if k.startswith("AI") and len(k) == 39:
         return True
-    if api_key.startswith("AQ") and len(api_key) == 53:
+    if k.startswith("AQ") and len(k) == 53:
         return True
     return False
 
 
 def validate_api_key(api_key: str, provider: str) -> tuple[bool, str]:
     """Validate API key format based on provider."""
+    if provider == "Google":
+        from core.services.credentials import get_secure_api_keys
+        import re
+
+        raw = str(api_key or "").strip()
+        if not raw or any("•" in line for line in raw.splitlines()):
+            keys = get_secure_api_keys("Google")
+            if not keys:
+                env_k = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
+                if env_k:
+                    keys = [env_k.strip()]
+        else:
+            keys = [
+                k.strip()
+                for k in re.split(r"[\r\n,;]+", raw)
+                if k.strip() and not k.strip().startswith("#")
+            ]
+
+        if not keys:
+            return False, "Google API key is required"
+
+        for k in keys:
+            if not is_valid_google_api_key(k):
+                return (
+                    False,
+                    "Invalid Google API key format (should start with 'AI' and be 39 chars, or start with 'AQ' and be 53 chars)",
+                )
+        return True, ""
+
     env_var_map = {
-        "Google": "GOOGLE_API_KEY or GEMINI_API_KEY",
         "OpenAI": "OPENAI_API_KEY",
         "Anthropic": "ANTHROPIC_API_KEY",
         "SpaceXAI": "SPACEXAI_API_KEY or XAI_API_KEY",
@@ -126,11 +155,7 @@ def validate_api_key(api_key: str, provider: str) -> tuple[bool, str]:
 
     # Use environment variable if field is empty
     if not api_key:
-        if provider == "Google":
-            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get(
-                "GEMINI_API_KEY", ""
-            )
-        elif provider == "SpaceXAI":
+        if provider == "SpaceXAI":
             api_key = os.environ.get("SPACEXAI_API_KEY") or os.environ.get(
                 "XAI_API_KEY", ""
             )
@@ -155,12 +180,6 @@ def validate_api_key(api_key: str, provider: str) -> tuple[bool, str]:
         return False, f"{provider} API key is required"
     elif not api_key and provider == "OpenAI-Compatible":
         return True, f"{provider} API key is optional and not provided."  # Valid state
-
-    if provider == "Google" and not is_valid_google_api_key(api_key):
-        return (
-            False,
-            "Invalid Google API key format (should start with 'AI' and be 39 chars, or start with 'AQ' and be 53 chars)",
-        )
     if provider == "OpenAI" and not (api_key.startswith("sk-") and len(api_key) >= 48):
         return False, "Invalid OpenAI API key format (should start with 'sk-')"
     if provider == "Anthropic" and not (

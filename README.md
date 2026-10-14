@@ -51,6 +51,14 @@
 > 9.  **Synchronized Gradio Web UI**:
 >    - Redesigned and responsive backend controls matching active inpainting modes.
 >    - Live Colab tunnel ping tester, retry options, and enhanced batch progress tracking.
+> 
+> 10. **Secure Cross-Platform API Vault & Zero-Leakage Masking**:
+>    - **Native OS Credential Storage**: Replaces plaintext tokens in project files with native operating system secret vaults.
+>      - **Windows**: Windows Credential Manager (`advapi32.dll` via `CredWriteW` / `CredReadW`).
+>      - **macOS**: Native Apple Keychain (`/usr/bin/security`).
+>      - **Linux**: Secret Service API / encrypted user vault (`~/.config/MangaTranslator/.credentials.enc`, `chmod 600`) with machine-bound key derivation.
+>    - **Multi-Key Auto-Rotation**: Native support for rotating Google AI Studio keys and Cloudflare Workers AI accounts (`ACCOUNT_ID:API_TOKEN`).
+>    - **Minimalist Web UI**: Full bullet dot-masking (`••••••••`) to prevent on-screen leakage, instant toggle buttons, and clean white layout.
 
 Gradio-based web application for automating the translation of manga/comic page images using AI. Targets speech bubbles and text outside of speech bubbles. Supports 60 languages and custom font pack usage.
 

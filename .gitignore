@@ -10,6 +10,7 @@ __pycache__/
 /runtime/
 /deps/
 /tests/
+/scratch/
 start-webui.bat
 start-webui.sh
 *.otf

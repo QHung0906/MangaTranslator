@@ -249,3 +249,31 @@
 #batch_status_message textarea {
     overflow-y: hidden !important;
 }
+
+#btn_toggle_google_key,
+#btn_toggle_cf_accounts,
+#test_colab_connection_btn {
+    max-width: 95px !important;
+    min-width: 60px !important;
+    height: 30px !important;
+    padding: 2px 10px !important;
+    font-size: 13px !important;
+    align-self: center !important;
+    margin-top: 4px !important;
+    white-space: nowrap !important;
+}
+
+#colab_connection_status {
+    align-self: center !important;
+    margin: 4px 8px 0 0 !important;
+    padding: 0 !important;
+    white-space: nowrap !important;
+}
+
+#colab_connection_status p {
+    margin: 0 !important;
+    padding: 0 !important;
+    white-space: nowrap !important;
+}
+
+

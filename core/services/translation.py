@@ -871,13 +871,13 @@ _API_KEY_LOCK = __import__("threading").Lock()
 
 
 def _load_api_keys_from_file() -> List[str]:
-    import os
-    if os.path.exists("API.txt"):
-        try:
-            with open("API.txt", "r", encoding="utf-8") as f:
-                return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
-        except Exception as e:
-            log_message(f"Error reading API.txt: {e}")
+    try:
+        from core.services.credentials import get_secure_api_keys
+        keys = get_secure_api_keys("Google")
+        if keys:
+            return keys
+    except Exception as e:
+        log_message(f"Error reading from secure vault: {e}")
     return []
 
 

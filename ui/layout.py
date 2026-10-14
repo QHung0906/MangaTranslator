@@ -1022,15 +1022,30 @@ def create_layout(
                             provider_state = gr.State(
                                 value=initial_provider_value,
                             )
+                            with gr.Row(
+                                visible=(config_initial_provider == "Google"),
+                            ) as google_key_header_row:
+                                gr.Markdown(
+                                    "**Google AI Studio API Key**<br>"
+                                    "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>"
+                                    "Stored securely in Windows Credential Manager. Supports rotating keys.</span>"
+                                )
+                                is_google_key_revealed = gr.State(value=False)
+                                btn_toggle_google_key = gr.Button(
+                                    "Show/Hide",
+                                    size="sm",
+                                    scale=0,
+                                    elem_id="btn_toggle_google_key",
+                                )
                             google_api_key = gr.Textbox(
-                                label="Google AI Studio API Key",
-                                placeholder="Enter Google AI Studio API key (starts with AI... / AQ...)",
-                                type="password",
-                                value=saved_settings.get("google_api_key", ""),
+                                show_label=False,
+                                placeholder="Paste Google API keys here (one per line, comma or space separated)...",
+                                value=callbacks.get_masked_google_keys(),
+                                lines=3,
+                                max_lines=6,
                                 show_copy_button=False,
                                 visible=(config_initial_provider == "Google"),
                                 elem_id="google_api_key",
-                                info="Stored locally. Or set via GOOGLE_API_KEY / GEMINI_API_KEY env var.",
                             )
                             manual_json_translation = gr.Checkbox(
                                 label="✏️ Manual Edit (TXT) / Dịch thủ công",
@@ -2005,35 +2020,61 @@ def create_layout(
                                     ),
                                     visible=_backend_visible,
                                 )
-                                outside_text_cloudflare_accounts = gr.Textbox(
-                                    label="Cloudflare Accounts (Xoay API)",
-                                    value=saved_settings.get(
-                                        "outside_text_cloudflare_accounts", ""
-                                    ),
-                                    lines=3,
-                                    placeholder="ACCOUNT_ID:API_TOKEN\nACCOUNT_ID_2:API_TOKEN_2",
-                                    info="Nhập mỗi dòng một tài khoản theo định dạng ACCOUNT_ID:API_TOKEN để tự động xoay khi hết hạn mức 10.000 Neurons/ngày.",
+                                with gr.Column(
                                     visible=_backend_visible and _initial_backend == "cloudflare",
-                                )
-                                with gr.Group(
-                                    visible=_backend_visible and _initial_backend == "remote_colab"
+                                    elem_id="outside_text_cloudflare_group",
+                                ) as outside_text_cloudflare_group:
+                                    with gr.Row() as cf_accounts_header_row:
+                                        gr.Markdown(
+                                            "**Cloudflare Accounts (Xoay API)**<br>"
+                                            "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>"
+                                            "Nhập mỗi dòng một tài khoản (ACCOUNT_ID:API_TOKEN) để tự động xoay khi hết hạn mức 10.000 Neurons/ngày.</span>"
+                                        )
+                                        is_cf_accounts_revealed = gr.State(value=False)
+                                        btn_toggle_cf_accounts = gr.Button(
+                                            "Show/Hide",
+                                            size="sm",
+                                            scale=0,
+                                            elem_id="btn_toggle_cf_accounts",
+                                        )
+                                    outside_text_cloudflare_accounts = gr.Textbox(
+                                        show_label=False,
+                                        value=callbacks.get_masked_cloudflare_accounts(),
+                                        lines=3,
+                                        max_lines=6,
+                                        placeholder="ACCOUNT_ID:API_TOKEN\nACCOUNT_ID_2:API_TOKEN_2",
+                                        show_copy_button=False,
+                                        elem_id="outside_text_cloudflare_accounts",
+                                    )
+                                with gr.Column(
+                                    visible=_backend_visible and _initial_backend == "remote_colab",
+                                    elem_id="outside_text_colab_group",
                                 ) as outside_text_colab_group:
+                                    with gr.Row() as colab_header_row:
+                                        gr.Markdown(
+                                            "**Colab Server URL (Cloudflare Tunnel)**<br>"
+                                            "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>"
+                                            "Dán link HTTPS do Cloudflare Tunnel sinh ra trên Google Colab.</span>"
+                                        )
+                                        colab_connection_status = gr.HTML(
+                                            value="",
+                                            elem_id="colab_connection_status",
+                                        )
+                                        test_colab_connection_btn = gr.Button(
+                                            "Test",
+                                            size="sm",
+                                            scale=0,
+                                            elem_id="test_colab_connection_btn",
+                                        )
                                     outside_text_colab_server_url = gr.Textbox(
-                                        label="Colab Server URL (Cloudflare Tunnel)",
+                                        show_label=False,
                                         value=saved_settings.get(
                                             "outside_text_colab_server_url", ""
                                         ),
                                         lines=1,
                                         placeholder="https://xxxx.trycloudflare.com",
-                                        info="Dán link HTTPS do Cloudflare Tunnel sinh ra trên Google Colab.",
-                                    )
-                                    test_colab_connection_btn = gr.Button(
-                                        "⚡ Kiểm tra kết nối Colab",
-                                        size="sm",
-                                        variant="secondary",
-                                    )
-                                    colab_connection_status = gr.Markdown(
-                                        value="",
+                                        show_copy_button=False,
+                                        elem_id="outside_text_colab_server_url",
                                     )
                                 outside_text_flux_residual_diff_threshold = gr.Slider(
                                     0.0,
@@ -3247,6 +3288,28 @@ def create_layout(
             queue=False,
         )
 
+
+        provider_selector.change(
+            fn=lambda prov: gr.update(visible=(prov == "Google")),
+            inputs=[provider_selector],
+            outputs=[google_key_header_row],
+            queue=False,
+        )
+
+        btn_toggle_google_key.click(
+            fn=callbacks.handle_toggle_google_key,
+            inputs=[is_google_key_revealed],
+            outputs=[google_api_key, btn_toggle_google_key, is_google_key_revealed],
+            queue=False,
+        )
+
+        btn_toggle_cf_accounts.click(
+            fn=callbacks.handle_toggle_cloudflare_accounts,
+            inputs=[is_cf_accounts_revealed],
+            outputs=[outside_text_cloudflare_accounts, btn_toggle_cf_accounts, is_cf_accounts_revealed],
+            queue=False,
+        )
+
         provider_selector.change(
             fn=callbacks.handle_provider_change,
             inputs=[
@@ -3621,7 +3684,7 @@ def create_layout(
                 outside_text_flux_residual_diff_threshold,
                 outside_text_seed,
                 inpaint_colored_bubbles,
-                outside_text_cloudflare_accounts,
+                outside_text_cloudflare_group,
                 outside_text_colab_group,
             ],
             queue=False,
@@ -3743,7 +3806,7 @@ def create_layout(
                 outside_text_flux_residual_diff_threshold,
                 outside_text_seed,
                 inpaint_colored_bubbles,
-                outside_text_cloudflare_accounts,
+                outside_text_cloudflare_group,
                 outside_text_colab_group,
             ],
             queue=False,
@@ -3791,16 +3854,16 @@ def create_layout(
 
         def _test_colab_connection_handler(url: str):
             if not url or not url.strip():
-                return "⚠️ *Vui lòng dán link Cloudflare Tunnel (vd: https://xxxx.trycloudflare.com) trước.*"
+                return "<span style='color:#eab308;font-weight:600;font-size:13px;'>⚠️ Missing URL</span>"
             try:
                 from core.image.colab_client import ColabClientManager
                 client = ColabClientManager(server_url=url.strip())
-                ok, msg = client.test_connection()
+                ok, _ = client.test_connection()
                 if ok:
-                    return f"✅ **Kết nối thành công!** Server: `{msg}`"
-                return f"❌ **Không thể kết nối:** {msg}"
-            except Exception as e:
-                return f"❌ **Lỗi:** {e}"
+                    return "<span style='color:#16a34a;font-weight:600;font-size:13px;'>✅ Connected</span>"
+                return "<span style='color:#dc2626;font-weight:600;font-size:13px;'>❌ Connection failed</span>"
+            except Exception:
+                return "<span style='color:#dc2626;font-weight:600;font-size:13px;'>❌ Connection failed</span>"
 
         test_colab_connection_btn.click(
             fn=_test_colab_connection_handler,
