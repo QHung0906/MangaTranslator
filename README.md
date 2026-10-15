@@ -10,6 +10,7 @@
 > 1.  **Remote Colab T4 GPU Inpainting Server (High-Performance Single Worker)**:
 >    - Offload heavy inpainting computation to a free Google Colab Tesla T4 GPU instance via zero-config Cloudflare Tunnel (`pycloudflared`).
 >    - **Optimized Single Worker Architecture**: Dedicated pipeline leveraging full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4) with direct VAE decoding (tiling/slicing disabled) and auto CUDA warmup.
+>    - **Startup Model Preloading**: Pre-allocates model pipelines and precomputed embeddings immediately on server boot, eliminating initial cold-start delays and client timeouts.
 >    - Keeps local computers cool, saves storage, and prevents local VRAM/system RAM exhaustion.
 >    - 1-click execution notebook provided in [colab_inpainting_server.ipynb](colab_inpainting_server.ipynb) with built-in real-time connection tester in the Web UI.
 > 
@@ -308,6 +309,7 @@ Offload speech bubble & outside-text inpainting to a free **Google Colab Tesla T
 
 ### ✨ Highlights
 - **High-Performance Single Worker**: Dedicated pipeline running at full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4).
+- **Startup Model Preloading**: Pre-allocates and warms up the selected model pipeline and cached embeddings immediately upon boot, avoiding initial client-side request timeouts.
 - **Direct VAE Decoding**: VAE tiling and slicing disabled to decode 1024x1024 in a single fused pass, cutting ~3–5s per image.
 - **Zero Text-Encoder Architecture**: Bypasses the ~2.8 GB text encoder entirely via precomputed prompt embeddings (`.pt`), slashing load time to ~2 seconds and saving disk space.
 - **Auto Warmup**: Primes CUDA kernels and allocators at server startup so the very first inpaint runs at peak speed.
