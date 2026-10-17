@@ -64,6 +64,10 @@ class UITranslationProviderSettings:
     openrouter_api_key: Optional[str] = ""
     openai_compatible_url: str = "http://localhost:8080/v1"
     openai_compatible_api_key: Optional[str] = ""
+    omniroute_url: str = "http://127.0.0.1:20128/v1"
+    omniroute_api_key: Optional[str] = ""
+    ninerouter_url: str = "http://127.0.0.1:20807/v1"
+    ninerouter_api_key: Optional[str] = ""
     manual_json_translation: bool = False
 
 
@@ -277,6 +281,10 @@ class UIConfigState:
             "openrouter_api_key": self.provider_settings.openrouter_api_key,
             "openai_compatible_url": self.provider_settings.openai_compatible_url,
             "openai_compatible_api_key": self.provider_settings.openai_compatible_api_key,
+            "omniroute_url": self.provider_settings.omniroute_url,
+            "omniroute_api_key": self.provider_settings.omniroute_api_key,
+            "ninerouter_url": self.provider_settings.ninerouter_url,
+            "ninerouter_api_key": self.provider_settings.ninerouter_api_key,
             "manual_json_translation": self.provider_settings.manual_json_translation,
             "model_name": self.llm_settings.model_name,
             "temperature": self.llm_settings.temperature,
@@ -614,6 +622,18 @@ class UIConfigState:
                 openai_compatible_api_key=data.get(
                     "openai_compatible_api_key", defaults["openai_compatible_api_key"]
                 ),
+                omniroute_url=data.get(
+                    "omniroute_url", defaults.get("omniroute_url", "http://127.0.0.1:20128/v1")
+                ),
+                omniroute_api_key=data.get(
+                    "omniroute_api_key", defaults.get("omniroute_api_key", "")
+                ),
+                ninerouter_url=data.get(
+                    "ninerouter_url", defaults.get("ninerouter_url", "http://127.0.0.1:20807/v1")
+                ),
+                ninerouter_api_key=data.get(
+                    "ninerouter_api_key", defaults.get("ninerouter_api_key", "")
+                ),
                 manual_json_translation=data.get("manual_json_translation", False),
             ),
             llm_settings=UITranslationLLMSettings(
@@ -837,6 +857,10 @@ def map_ui_to_backend_config(
         openrouter_api_key=ui_state.provider_settings.openrouter_api_key or "",
         openai_compatible_url=ui_state.provider_settings.openai_compatible_url,
         openai_compatible_api_key=ui_state.provider_settings.openai_compatible_api_key,
+        omniroute_url=ui_state.provider_settings.omniroute_url,
+        omniroute_api_key=ui_state.provider_settings.omniroute_api_key,
+        ninerouter_url=ui_state.provider_settings.ninerouter_url,
+        ninerouter_api_key=ui_state.provider_settings.ninerouter_api_key,
         model_name=ui_state.llm_settings.model_name or "",
         temperature=ui_state.llm_settings.temperature,
         top_p=ui_state.llm_settings.top_p,

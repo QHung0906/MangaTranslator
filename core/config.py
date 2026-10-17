@@ -55,6 +55,10 @@ class TranslationConfig:
     openrouter_api_key: str = ""
     openai_compatible_url: str = "http://localhost:8080/v1"
     openai_compatible_api_key: Optional[str] = ""
+    omniroute_url: str = "http://127.0.0.1:20128/v1"
+    omniroute_api_key: Optional[str] = ""
+    ninerouter_url: str = "http://127.0.0.1:20807/v1"
+    ninerouter_api_key: Optional[str] = ""
     model_name: str = "gemini-3.7-flash"
     provider_models: dict[str, Optional[str]] = field(default_factory=dict)
     temperature: float = float(_DEFAULT_SAMPLING["temperature"])
@@ -269,6 +273,10 @@ class MangaTranslatorConfig:
             self.translation.openai_compatible_api_key = os.environ.get(
                 "OPENAI_COMPATIBLE_API_KEY", ""
             )
+        if not self.translation.omniroute_api_key:
+            self.translation.omniroute_api_key = os.environ.get("OMNIROUTE_API_KEY", "")
+        if not self.translation.ninerouter_api_key:
+            self.translation.ninerouter_api_key = os.environ.get("NINEROUTER_API_KEY", "")
         if not self.outside_text.huggingface_token:
             self.outside_text.huggingface_token = os.environ.get("HF_TOKEN", "")
 

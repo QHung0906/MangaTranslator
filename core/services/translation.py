@@ -364,7 +364,7 @@ def _build_generation_config(
             is_reasoning = is_meta_reasoning_model(model_name)
         elif provider == "OpenRouter":
             is_reasoning = openrouter_is_reasoning_model(model_name, debug)
-        elif provider == "OpenAI-Compatible":
+        elif provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
             is_reasoning = is_openai_compatible_reasoning_model(model_name)
         elif provider == "DeepSeek":
             is_reasoning = is_deepseek_reasoning_model(model_name)
@@ -802,10 +802,11 @@ def _build_generation_config(
 
         return generation_config
 
-    elif provider == "OpenAI-Compatible":
+    elif provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
         is_openai_model = is_openai_model_family(model_name)
         is_anthropic_model = is_anthropic_model_family(model_name)
-        is_azure = is_azure_url(config.openai_compatible_url)
+        url = config.omniroute_url if provider == "OmniRoute" else (config.ninerouter_url if provider == "9router" else config.openai_compatible_url)
+        is_azure = is_azure_url(url)
 
         is_openai_reasoning = is_openai_model and _is_openai_reasoning_meta(model_name)
         is_anthropic_reasoning = is_anthropic_reasoning_model(model_name)
@@ -911,6 +912,10 @@ def _get_api_key_candidates(config: TranslationConfig, provider: str) -> List[st
         return [config.openrouter_api_key] if config.openrouter_api_key else []
     elif provider == "OpenAI-Compatible":
         return [config.openai_compatible_api_key] if config.openai_compatible_api_key else [""]
+    elif provider == "OmniRoute":
+        return [config.omniroute_api_key] if config.omniroute_api_key else [""]
+    elif provider == "9router":
+        return [config.ninerouter_api_key] if config.ninerouter_api_key else [""]
     return []
 
 
@@ -1118,10 +1123,15 @@ def _call_llm_endpoint(
                     debug=debug,
                     enable_web_search=config.enable_web_search,
                 )
-            elif provider == "OpenAI-Compatible":
-                base_url = config.openai_compatible_url
+            elif provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
+                if provider == "OmniRoute":
+                    base_url = config.omniroute_url or "http://127.0.0.1:20128/v1"
+                elif provider == "9router":
+                    base_url = config.ninerouter_url or "http://127.0.0.1:20807/v1"
+                else:
+                    base_url = config.openai_compatible_url
                 if not base_url:
-                    raise TranslationError("OpenAI-Compatible URL is missing.")
+                    raise TranslationError(f"{provider} URL is missing.")
                 generation_config = _build_generation_config(
                     provider, model_name, config, debug
                 )

@@ -390,6 +390,10 @@ def _build_ui_state_from_args(args: tuple, is_batch: bool) -> UIConfigState:
             openrouter_api_key=openrouter_api_key,
             openai_compatible_url=openai_compatible_url_input,
             openai_compatible_api_key=openai_compatible_api_key_input,
+            omniroute_url=openai_compatible_url_input,
+            omniroute_api_key=openai_compatible_api_key_input,
+            ninerouter_url=openai_compatible_url_input,
+            ninerouter_api_key=openai_compatible_api_key_input,
             manual_json_translation=manual_json_translation_val,
         ),
         llm_settings=UITranslationLLMSettings(
@@ -514,28 +518,40 @@ def _validate_ui_state(ui_state: UIConfigState) -> None:
             api_key_to_validate = ui_state.provider_settings.openrouter_api_key
         elif provider_selector == "OpenAI-Compatible":
             api_key_to_validate = ui_state.provider_settings.openai_compatible_api_key
+        elif provider_selector == "OmniRoute":
+            api_key_to_validate = ui_state.provider_settings.omniroute_api_key
+        elif provider_selector == "9router":
+            api_key_to_validate = ui_state.provider_settings.ninerouter_api_key
 
         api_valid, api_msg = utils.validate_api_key(
             api_key_to_validate, provider_selector
         )
         if not api_valid and not (
-            provider_selector == "OpenAI-Compatible" and not api_key_to_validate
+            provider_selector in ("OpenAI-Compatible", "OmniRoute", "9router") and not api_key_to_validate
         ):
             raise gr.Error(f"{ERROR_PREFIX}{api_msg}")
 
     if (
-        ui_state.provider_settings.provider == "OpenAI-Compatible"
+        ui_state.provider_settings.provider in ("OpenAI-Compatible", "OmniRoute", "9router")
         and not ui_state.general.cleaning_only
         and not ui_state.general.upscaling_only
         and not ui_state.general.test_mode
     ):
-        if not ui_state.provider_settings.openai_compatible_url:
-            raise gr.Error(f"{ERROR_PREFIX}OpenAI-Compatible URL is required.")
-        if not ui_state.provider_settings.openai_compatible_url.startswith(
-            ("http://", "https://")
-        ):
+        p_name = ui_state.provider_settings.provider
+        target_url = (
+            ui_state.provider_settings.omniroute_url
+            if p_name == "OmniRoute"
+            else (
+                ui_state.provider_settings.ninerouter_url
+                if p_name == "9router"
+                else ui_state.provider_settings.openai_compatible_url
+            )
+        )
+        if not target_url:
+            raise gr.Error(f"{ERROR_PREFIX}{p_name} URL is required.")
+        if not target_url.startswith(("http://", "https://")):
             raise gr.Error(
-                f"{ERROR_PREFIX}Invalid OpenAI-Compatible URL format. Must start with http:// or https://",
+                f"{ERROR_PREFIX}Invalid {p_name} URL format. Must start with http:// or https://",
             )
 
     if ui_state.outside_text.enabled:
@@ -1447,6 +1463,7 @@ def handle_save_config_click(*args: Any) -> str:
         batch_previous_context_text_count_val,
         manual_json_translation_val,
     ) = args
+    saved_settings = settings_manager.get_saved_settings()
     ui_state = UIConfigState(
         detection=UIDetectionSettings(
             confidence=conf,
@@ -1546,8 +1563,12 @@ def handle_save_config_click(*args: Any) -> str:
             opencode_api_key=opencode_key,
             opencode_tier=("go" if "go" in str(opencode_tier_val).lower() else "zen"),
             openrouter_api_key=or_key,
-            openai_compatible_url=comp_url,
-            openai_compatible_api_key=comp_key,
+            openai_compatible_url=comp_url if prov == "OpenAI-Compatible" else saved_settings.get("openai_compatible_url", "http://localhost:8080/v1"),
+            openai_compatible_api_key=comp_key if prov == "OpenAI-Compatible" else saved_settings.get("openai_compatible_api_key", ""),
+            omniroute_url=comp_url if prov == "OmniRoute" else saved_settings.get("omniroute_url", "http://127.0.0.1:20128/v1"),
+            omniroute_api_key=comp_key if prov == "OmniRoute" else saved_settings.get("omniroute_api_key", ""),
+            ninerouter_url=comp_url if prov == "9router" else saved_settings.get("ninerouter_url", "http://127.0.0.1:20807/v1"),
+            ninerouter_api_key=comp_key if prov == "9router" else saved_settings.get("ninerouter_api_key", ""),
             manual_json_translation=manual_json_translation_val,
         ),
         llm_settings=UITranslationLLMSettings(
@@ -2439,7 +2460,7 @@ def handle_ocr_method_change(
                 ocr_method="manga-ocr", current_model=current_model
             )
             updates.append(model_update)
-        elif current_provider == "OpenAI-Compatible":
+        elif current_provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
             model_update = utils.fetch_and_update_compatible_models(
                 openai_compatible_url, openai_compatible_api_key, current_model
             )
@@ -2569,7 +2590,7 @@ def handle_ocr_method_change(
                 ocr_method="manga-ocr", current_model=current_model
             )
             updates.append(model_update)
-        elif current_provider == "OpenAI-Compatible":
+        elif current_provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
             model_update = utils.fetch_and_update_compatible_models(
                 openai_compatible_url, openai_compatible_api_key, current_model
             )
@@ -2713,7 +2734,7 @@ def handle_ocr_method_change(
                 ocr_method="LLM", current_model=current_model
             )
             updates.append(model_update)
-        elif current_provider == "OpenAI-Compatible":
+        elif current_provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
             model_update = utils.fetch_and_update_compatible_models(
                 openai_compatible_url, openai_compatible_api_key, current_model
             )

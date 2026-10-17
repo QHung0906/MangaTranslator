@@ -377,6 +377,28 @@ js_status_fade = """
 }
 """
 
+js_endpoint_status_fade = """
+() => {
+    const el = document.getElementById('endpoint_connection_status');
+    if (el && el.textContent.trim() !== '') {
+        clearTimeout(el.fadeTimer);
+        clearTimeout(el.resetTimer);
+        el.style.display = 'inline-block';
+        el.style.transition = 'none';
+        el.style.opacity = '1';
+        el.fadeTimer = setTimeout(() => {
+            el.style.transition = 'opacity 800ms ease-out';
+            el.style.opacity = '0';
+            el.resetTimer = setTimeout(() => {
+                el.innerHTML = '';
+                el.style.opacity = '1';
+                el.style.transition = 'none';
+            }, 800);
+        }, 3500);
+    }
+}
+"""
+
 js_refresh_button_reset = """
 () => {
     setTimeout(() => {
@@ -458,9 +480,7 @@ def create_layout(
         initial_model_name = saved_settings.get("model_name")
 
         if (
-            initial_provider == "OpenRouter"
-            or initial_provider == "OpenAI-Compatible"
-            or initial_provider == "OpenCode"
+            initial_provider in ("OpenRouter", "OpenAI-Compatible", "OpenCode", "OmniRoute", "9router")
         ):
             initial_models_choices = [initial_model_name] if initial_model_name else []
         else:
@@ -1185,37 +1205,71 @@ def create_layout(
                                 elem_id="openrouter_api_key",
                                 info="Stored locally. Or set via OPENROUTER_API_KEY env var.",
                             )
-                            openai_compatible_url_input = gr.Textbox(
-                                label="OpenAI-Compatible URL",
-                                placeholder="Enter Base URL (e.g., http://localhost:8080/v1 or https://<resource>.openai.azure.com)",
-                                type="text",
-                                value=saved_settings.get(
+                            with gr.Row(
+                                visible=(
+                                    config_initial_provider in ("OpenAI-Compatible", "OmniRoute", "9router")
+                                ),
+                                elem_id="endpoint_test_header_row",
+                            ) as endpoint_test_header_row:
+                                endpoint_connection_status = gr.HTML(
+                                    value="",
+                                    elem_id="endpoint_connection_status",
+                                )
+                                test_endpoint_connection_btn = gr.Button(
+                                    "Test",
+                                    size="sm",
+                                    scale=0,
+                                    elem_id="test_endpoint_connection_btn",
+                                )
+                            if config_initial_provider == "OmniRoute":
+                                init_comp_url = saved_settings.get("omniroute_url", "http://127.0.0.1:20128/v1")
+                                init_comp_key = saved_settings.get("omniroute_api_key", "")
+                                init_url_label = "OmniRoute URL"
+                                init_key_label = "OmniRoute API Key"
+                                init_url_info = "Base URL of OmniRoute endpoint."
+                            elif config_initial_provider == "9router":
+                                init_comp_url = saved_settings.get("ninerouter_url", "http://127.0.0.1:20807/v1")
+                                init_comp_key = saved_settings.get("ninerouter_api_key", "")
+                                init_url_label = "9router URL"
+                                init_key_label = "9router API Key"
+                                init_url_info = "Base URL of 9router endpoint."
+                            else:
+                                init_comp_url = saved_settings.get(
                                     "openai_compatible_url",
                                     settings_manager.DEFAULT_SETTINGS[
                                         "openai_compatible_url"
                                     ],
-                                ),
+                                )
+                                init_comp_key = saved_settings.get("openai_compatible_api_key", "")
+                                init_url_label = "OpenAI-Compatible URL"
+                                init_key_label = "OpenAI-Compatible API Key"
+                                init_url_info = "Base URL of OpenAI-Compatible endpoint."
+
+                            openai_compatible_url_input = gr.Textbox(
+                                label=init_url_label,
+                                placeholder="Enter Base URL (e.g., http://localhost:8080/v1 or https://<resource>.openai.azure.com)",
+                                type="text",
+                                value=init_comp_url,
                                 show_copy_button=False,
                                 visible=(
-                                    config_initial_provider == "OpenAI-Compatible"
+                                    config_initial_provider in ("OpenAI-Compatible", "OmniRoute", "9router")
                                 ),
                                 elem_id="openai_compatible_url_input",
-                                info="Base URL of your OpenAI-Compatible endpoint or Azure OpenAI endpoint.",
+                                info=init_url_info,
                             )
                             openai_compatible_api_key_input = gr.Textbox(
-                                label="OpenAI-Compatible API Key (Optional)",
+                                label=init_key_label,
                                 placeholder="Enter API key if required",
                                 type="password",
-                                value=saved_settings.get(
-                                    "openai_compatible_api_key", ""
-                                ),
+                                value=init_comp_key,
                                 show_copy_button=False,
                                 visible=(
-                                    config_initial_provider == "OpenAI-Compatible"
+                                    config_initial_provider in ("OpenAI-Compatible", "OmniRoute", "9router")
                                 ),
                                 elem_id="openai_compatible_api_key_input",
                                 info="Stored locally. Or set via OPENAI_COMPATIBLE_API_KEY env var.",
                             )
+
                             config_model_name = gr.Dropdown(
                                 choices=config_initial_models_choices,
                                 label="Model",
@@ -2013,11 +2067,7 @@ def create_layout(
                                     choices=_flux_backend_choices(_initial_method),
                                     value=_initial_backend,
                                     label="Flux Backend",
-                                    info=(
-                                        "SDNQ/sd.cpp: cross-platform, local. "
-                                        "Cloudflare: Serverless 10k Neurons/ngày free. "
-                                        "Nunchaku: CUDA-only."
-                                    ),
+                                    info="SDNQ/sd.cpp for local generation; Cloudflare Workers AI or Remote Colab for cloud acceleration.",
                                     visible=_backend_visible,
                                 )
                                 with gr.Column(
@@ -2026,9 +2076,9 @@ def create_layout(
                                 ) as outside_text_cloudflare_group:
                                     with gr.Row() as cf_accounts_header_row:
                                         gr.Markdown(
-                                            "**Cloudflare Accounts (Xoay API)**<br>"
+                                            "**Cloudflare Accounts**<br>"
                                             "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>"
-                                            "Nhập mỗi dòng một tài khoản (ACCOUNT_ID:API_TOKEN) để tự động xoay khi hết hạn mức 10.000 Neurons/ngày.</span>"
+                                            "One account per line (ACCOUNT_ID:API_TOKEN). Automatically rotates when quota is reached.</span>"
                                         )
                                         is_cf_accounts_revealed = gr.State(value=False)
                                         btn_toggle_cf_accounts = gr.Button(
@@ -2052,9 +2102,9 @@ def create_layout(
                                 ) as outside_text_colab_group:
                                     with gr.Row() as colab_header_row:
                                         gr.Markdown(
-                                            "**Colab Server URL (Cloudflare Tunnel)**<br>"
+                                            "**Colab Server URL**<br>"
                                             "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>"
-                                            "Dán link HTTPS do Cloudflare Tunnel sinh ra trên Google Colab.</span>"
+                                            "HTTPS link generated by Cloudflare Tunnel on Google Colab.</span>"
                                         )
                                         colab_connection_status = gr.HTML(
                                             value="",
@@ -3220,53 +3270,53 @@ def create_layout(
         ]
 
         # Config Tab Navigation & Updates
-        output_components_for_switch = setting_groups + nav_buttons
+        output_components_for_switch = setting_groups + nav_buttons + [endpoint_connection_status]
         nav_button_detection.click(
             fn=lambda idx=0: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_cleaning.click(
             fn=lambda idx=1: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_translation.click(
             fn=lambda idx=2: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_rendering.click(
             fn=lambda idx=3: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_outside_text.click(
             fn=lambda idx=4: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_output.click(
             fn=lambda idx=5: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
         nav_button_other.click(
             fn=lambda idx=6: utils.switch_settings_view(
                 idx, setting_groups, nav_buttons
-            ),
+            ) + [gr.update(value="")],
             outputs=output_components_for_switch,
             queue=False,
         )
@@ -3355,9 +3405,9 @@ def create_layout(
         ).then(  # Trigger model fetch *after* provider change updates visibility etc.
             fn=lambda prov, url, comp_key, opencode_tier_val, opencode_key, ocr_method: (
                 utils.fetch_and_update_compatible_models(
-                    url, comp_key, force_refresh=True
+                    url, comp_key, force_refresh=True, provider=prov
                 )
-                if prov == "OpenAI-Compatible"
+                if prov in ("OpenAI-Compatible", "OmniRoute", "9router")
                 else (
                     utils.fetch_and_update_openrouter_models(ocr_method=ocr_method)
                     if prov == "OpenRouter"
@@ -3869,6 +3919,63 @@ def create_layout(
             fn=_test_colab_connection_handler,
             inputs=[outside_text_colab_server_url],
             outputs=[colab_connection_status],
+            queue=False,
+        )
+
+        def _test_endpoint_connection_handler(url: str, api_key: str, current_model: str):
+            if not url or not url.strip():
+                return "<span style='color:#eab308;font-weight:600;font-size:13px;'>⚠️ Missing URL</span>", gr.update()
+            try:
+                import requests
+                clean_url = url.strip().rstrip('/')
+                fetch_url = f"{clean_url}/models"
+                headers = {}
+                if api_key and api_key.strip():
+                    headers["Authorization"] = f"Bearer {api_key.strip()}"
+                resp = requests.get(fetch_url, headers=headers, timeout=8)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw_models = data.get("data") or data.get("models") or []
+                    model_ids = []
+                    for m in raw_models:
+                        if isinstance(m, dict):
+                            mid = m.get("id") or m.get("name")
+                            if mid and isinstance(mid, str):
+                                model_ids.append(mid.strip())
+                        elif isinstance(m, str):
+                            model_ids.append(m.strip())
+                    
+                    priority = ["Coding", "Balanced", "Speed"]
+                    sorted_models = [m for m in priority if m in model_ids] + sorted([m for m in model_ids if m not in priority], key=str.lower)
+                    
+                    # Update cache
+                    utils.COMPATIBLE_MODEL_CACHE["url"] = url
+                    utils.COMPATIBLE_MODEL_CACHE["models"] = sorted_models
+                    
+                    selected = current_model if current_model in sorted_models else (sorted_models[0] if sorted_models else None)
+                    msg = f"<span style='color:#16a34a;font-weight:600;font-size:13px;'>✅ Connected ({len(sorted_models)} models)</span>"
+                    return msg, gr.update(choices=sorted_models, value=selected)
+                elif resp.status_code == 401:
+                    return "<span style='color:#dc2626;font-weight:600;font-size:13px;'>❌ 401 Unauthorized</span>", gr.update()
+                else:
+                    return f"<span style='color:#dc2626;font-weight:600;font-size:13px;'>❌ Error {resp.status_code}</span>", gr.update()
+            except Exception:
+                return "<span style='color:#dc2626;font-weight:600;font-size:13px;'>❌ Connection failed</span>", gr.update()
+
+        test_endpoint_connection_btn.click(
+            fn=_test_endpoint_connection_handler,
+            inputs=[openai_compatible_url_input, openai_compatible_api_key_input, config_model_name],
+            outputs=[endpoint_connection_status, config_model_name],
+            queue=False,
+        ).then(fn=None, inputs=None, outputs=None, js=js_endpoint_status_fade, queue=False)
+
+        provider_selector.change(
+            fn=lambda p: (
+                gr.update(visible=(p in ("OpenAI-Compatible", "OmniRoute", "9router"))),
+                gr.update(value=""),
+            ),
+            inputs=provider_selector,
+            outputs=[endpoint_test_header_row, endpoint_connection_status],
             queue=False,
         )
 

@@ -150,6 +150,8 @@ def validate_api_key(api_key: str, provider: str) -> tuple[bool, str]:
         "QwenCloud": "QWENCLOUD_API_KEY or QWEN_API_KEY",
         "OpenCode": "OPENCODE_API_KEY, OPENCODE_ZEN_API_KEY, or OPENCODE_GO_API_KEY",
         "OpenAI-Compatible": "OPENAI_COMPATIBLE_API_KEY",
+        "OmniRoute": "OMNIROUTE_API_KEY",
+        "9router": "NINEROUTER_API_KEY",
     }
     env_var_name = env_var_map.get(provider)
 
@@ -176,9 +178,9 @@ def validate_api_key(api_key: str, provider: str) -> tuple[bool, str]:
         elif env_var_name:
             api_key = os.environ.get(env_var_name, "")
 
-    if not api_key and provider != "OpenAI-Compatible":
+    if not api_key and provider not in ("OpenAI-Compatible", "OmniRoute", "9router"):
         return False, f"{provider} API key is required"
-    elif not api_key and provider == "OpenAI-Compatible":
+    elif not api_key and provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
         return True, f"{provider} API key is optional and not provided."  # Valid state
     if provider == "OpenAI" and not (api_key.startswith("sk-") and len(api_key) >= 48):
         return False, "Invalid OpenAI API key format (should start with 'sk-')"
@@ -1105,13 +1107,38 @@ def update_translation_ui(
     opencode_visible_update = gr.update(visible=(provider == "OpenCode"))
     opencode_tier_visible_update = gr.update(visible=(provider == "OpenCode"))
     openrouter_visible_update = gr.update(visible=(provider == "OpenRouter"))
+    is_router_or_compat = provider in ("OpenAI-Compatible", "OmniRoute", "9router")
+    if provider == "OmniRoute":
+        url_label = "OmniRoute URL"
+        url_val = saved_settings.get("omniroute_url", "http://127.0.0.1:20128/v1")
+        url_info = "Base URL of OmniRoute endpoint."
+        key_label = "OmniRoute API Key"
+        key_val = saved_settings.get("omniroute_api_key", "")
+    elif provider == "9router":
+        url_label = "9router URL"
+        url_val = saved_settings.get("ninerouter_url", "http://127.0.0.1:20807/v1")
+        url_info = "Base URL of 9router endpoint."
+        key_label = "9router API Key"
+        key_val = saved_settings.get("ninerouter_api_key", "")
+    else:
+        url_label = "OpenAI-Compatible URL"
+        url_val = saved_settings.get("openai_compatible_url", DEFAULT_SETTINGS.get("openai_compatible_url", "http://localhost:8080/v1"))
+        url_info = "Base URL of OpenAI-Compatible endpoint."
+        key_label = "OpenAI-Compatible API Key"
+        key_val = saved_settings.get("openai_compatible_api_key", "")
+
     openai_compatible_url_visible_update = gr.update(
-        visible=(provider == "OpenAI-Compatible")
+        visible=is_router_or_compat,
+        label=url_label,
+        value=url_val,
+        info=url_info,
     )
     openai_compatible_key_visible_update = gr.update(
-        visible=(provider == "OpenAI-Compatible")
+        visible=is_router_or_compat,
+        label=key_label,
+        value=key_val,
     )
-    if provider in ("OpenRouter", "OpenAI-Compatible", "OpenCode"):
+    if provider in ("OpenRouter", "OpenAI-Compatible", "OpenCode", "OmniRoute", "9router"):
         cached_models = (
             OPENCODE_MODEL_CACHE.get(
                 "go" if "go" in (opencode_tier or "").lower() else "zen"
@@ -1608,6 +1635,7 @@ def fetch_and_update_compatible_models(
     api_key: Optional[str],
     current_model: Optional[str] = None,
     force_refresh: bool = False,
+    provider: Optional[str] = None,
 ):
     """Fetches models from a generic OpenAI-Compatible endpoint and updates dropdown.
 
@@ -1635,7 +1663,8 @@ def fetch_and_update_compatible_models(
         provider_models_dict = saved_settings.get(
             "provider_models", DEFAULT_SETTINGS["provider_models"]
         )
-        remembered_comp_model = provider_models_dict.get("OpenAI-Compatible")
+        target_provider = provider or saved_settings.get("provider") or "OpenAI-Compatible"
+        remembered_comp_model = provider_models_dict.get(target_provider) or provider_models_dict.get("OpenAI-Compatible")
         selected_comp_model = (
             current_model
             if current_model in cached_models
@@ -1690,7 +1719,7 @@ def fetch_and_update_compatible_models(
                     model.get("id") or model.get("name") or model.get("deployment_name")
                 )
                 if raw_id:
-                    clean_id = str(raw_id).rsplit("/", 1)[-1]
+                    clean_id = str(raw_id).strip()
                     if clean_id:
                         fetched_models.append(clean_id)
         fetched_models = [m for m in fetched_models if m]
@@ -1733,7 +1762,11 @@ def fetch_and_update_compatible_models(
             COMPATIBLE_MODEL_CACHE["url"] = url
             COMPATIBLE_MODEL_CACHE["models"] = fallback_models
             return gr.update(choices=fallback_models, value=extracted_dep_name)
-        gr.Warning(f"Error fetching models from {url}: {e}")
+        err_str = str(e)
+        if "401" in err_str or "Unauthorized" in err_str:
+            gr.Warning(f"Unauthorized (401) from {url}: Please check your API key.")
+        else:
+            gr.Warning(f"Error fetching models from {url}: {e}")
         return gr.update(choices=[], value=None)
 
 
@@ -1836,8 +1869,8 @@ def initial_dynamic_fetch(
     """Handle initial model fetching for dynamic providers on app load."""
     if provider == "OpenRouter":
         return fetch_and_update_openrouter_models(ocr_method=ocr_method)
-    elif provider == "OpenAI-Compatible":
-        return fetch_and_update_compatible_models(url, key)
+    elif provider in ("OpenAI-Compatible", "OmniRoute", "9router"):
+        return fetch_and_update_compatible_models(url, key, provider=provider)
     elif provider == "OpenCode":
         return fetch_and_update_opencode_models(
             tier=opencode_tier or "zen",

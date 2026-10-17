@@ -111,6 +111,8 @@ PROVIDER_MODELS: Dict[str, List[str]] = {
     "OpenCode": [],
     "OpenRouter": [],
     "OpenAI-Compatible": [],
+    "OmniRoute": [],
+    "9router": [],
 }
 
 DEFAULT_PROVIDER = DEFAULT_LLM_PROVIDER
@@ -133,6 +135,10 @@ DEFAULT_SETTINGS = {
     "openrouter_api_key": "",
     "openai_compatible_url": "http://localhost:8080/v1",
     "openai_compatible_api_key": "",
+    "omniroute_url": "http://127.0.0.1:20128/v1",
+    "omniroute_api_key": "",
+    "ninerouter_url": "http://127.0.0.1:20807/v1",
+    "ninerouter_api_key": "",
     "model_name": (
         PROVIDER_MODELS[DEFAULT_PROVIDER][0]
         if PROVIDER_MODELS[DEFAULT_PROVIDER]
@@ -170,6 +176,8 @@ DEFAULT_SETTINGS = {
         "OpenCode": None,
         "OpenRouter": None,
         "OpenAI-Compatible": None,
+        "OmniRoute": None,
+        "9router": None,
     },
     "input_language": "Japanese",
     "output_language": "English",
@@ -624,6 +632,8 @@ def get_saved_settings() -> Dict[str, Any]:
                 loaded_provider == "OpenRouter"
                 or loaded_provider == "OpenAI-Compatible"
                 or loaded_provider == "OpenCode"
+                or loaded_provider == "OmniRoute"
+                or loaded_provider == "9router"
             ):
                 settings["model_name"] = saved_model_for_provider
             else:
@@ -663,7 +673,7 @@ def get_saved_settings() -> Dict[str, Any]:
             always_print=True,
         )
         default_provider = DEFAULT_SETTINGS["provider"]
-        if default_provider != "OpenRouter" and default_provider != "OpenAI-Compatible":
+        if default_provider not in ("OpenRouter", "OpenAI-Compatible", "OpenCode", "OmniRoute", "9router"):
             valid_models = PROVIDER_MODELS.get(default_provider, [])
             settings["model_name"] = valid_models[0] if valid_models else None
         else:
@@ -674,7 +684,7 @@ def get_saved_settings() -> Dict[str, Any]:
             always_print=True,
         )
         default_provider = DEFAULT_SETTINGS["provider"]
-        if default_provider != "OpenRouter" and default_provider != "OpenAI-Compatible":
+        if default_provider not in ("OpenRouter", "OpenAI-Compatible", "OpenCode", "OmniRoute", "9router"):
             valid_models = PROVIDER_MODELS.get(default_provider, [])
             settings["model_name"] = valid_models[0] if valid_models else None
         else:
@@ -712,7 +722,12 @@ def reset_to_defaults() -> Dict[str, Any]:
             "opencode_api_key",
             "opencode_tier",
             "openrouter_api_key",
+            "openai_compatible_url",
             "openai_compatible_api_key",
+            "omniroute_url",
+            "omniroute_api_key",
+            "ninerouter_url",
+            "ninerouter_api_key",
             "outside_text_huggingface_token",
         ]
         for key in preserved_keys:
