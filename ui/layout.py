@@ -1205,22 +1205,6 @@ def create_layout(
                                 elem_id="openrouter_api_key",
                                 info="Stored locally. Or set via OPENROUTER_API_KEY env var.",
                             )
-                            with gr.Row(
-                                visible=(
-                                    config_initial_provider in ("OpenAI-Compatible", "OmniRoute", "9router")
-                                ),
-                                elem_id="endpoint_test_header_row",
-                            ) as endpoint_test_header_row:
-                                endpoint_connection_status = gr.HTML(
-                                    value="",
-                                    elem_id="endpoint_connection_status",
-                                )
-                                test_endpoint_connection_btn = gr.Button(
-                                    "Test",
-                                    size="sm",
-                                    scale=0,
-                                    elem_id="test_endpoint_connection_btn",
-                                )
                             if config_initial_provider == "OmniRoute":
                                 init_comp_url = saved_settings.get("omniroute_url", "http://127.0.0.1:20128/v1")
                                 init_comp_key = saved_settings.get("omniroute_api_key", "")
@@ -1245,18 +1229,38 @@ def create_layout(
                                 init_key_label = "OpenAI-Compatible API Key"
                                 init_url_info = "Base URL of OpenAI-Compatible endpoint."
 
-                            openai_compatible_url_input = gr.Textbox(
-                                label=init_url_label,
-                                placeholder="Enter Base URL (e.g., http://localhost:8080/v1 or https://<resource>.openai.azure.com)",
-                                type="text",
-                                value=init_comp_url,
-                                show_copy_button=False,
+                            with gr.Column(
                                 visible=(
                                     config_initial_provider in ("OpenAI-Compatible", "OmniRoute", "9router")
                                 ),
-                                elem_id="openai_compatible_url_input",
-                                info=init_url_info,
-                            )
+                                elem_id="endpoint_url_group",
+                            ) as endpoint_url_group:
+                                with gr.Row(
+                                    elem_id="endpoint_header_row",
+                                ) as endpoint_header_row:
+                                    endpoint_header_markdown = gr.Markdown(
+                                        f"**{init_url_label}**<br>"
+                                        f"<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>{init_url_info}</span>",
+                                        elem_id="endpoint_header_markdown",
+                                    )
+                                    endpoint_connection_status = gr.HTML(
+                                        value="",
+                                        elem_id="endpoint_connection_status",
+                                    )
+                                    test_endpoint_connection_btn = gr.Button(
+                                        "Test",
+                                        size="sm",
+                                        scale=0,
+                                        elem_id="test_endpoint_connection_btn",
+                                    )
+                                openai_compatible_url_input = gr.Textbox(
+                                    show_label=False,
+                                    placeholder="Enter Base URL (e.g., http://localhost:8080/v1 or https://<resource>.openai.azure.com)",
+                                    type="text",
+                                    value=init_comp_url,
+                                    show_copy_button=False,
+                                    elem_id="openai_compatible_url_input",
+                                )
                             openai_compatible_api_key_input = gr.Textbox(
                                 label=init_key_label,
                                 placeholder="Enter API key if required",
@@ -3405,7 +3409,7 @@ def create_layout(
         ).then(  # Trigger model fetch *after* provider change updates visibility etc.
             fn=lambda prov, url, comp_key, opencode_tier_val, opencode_key, ocr_method: (
                 utils.fetch_and_update_compatible_models(
-                    url, comp_key, force_refresh=True, provider=prov
+                    url, comp_key, force_refresh=False, silent=True, provider=prov
                 )
                 if prov in ("OpenAI-Compatible", "OmniRoute", "9router")
                 else (
@@ -3969,13 +3973,37 @@ def create_layout(
             queue=False,
         ).then(fn=None, inputs=None, outputs=None, js=js_endpoint_status_fade, queue=False)
 
-        provider_selector.change(
-            fn=lambda p: (
-                gr.update(visible=(p in ("OpenAI-Compatible", "OmniRoute", "9router"))),
+        def _update_endpoint_header_on_provider_change(provider: str):
+            is_compat = provider in ("OpenAI-Compatible", "OmniRoute", "9router")
+            if provider == "OmniRoute":
+                md = (
+                    "**OmniRoute URL**<br>"
+                    "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>Base URL of OmniRoute endpoint.</span>"
+                )
+            elif provider == "9router":
+                md = (
+                    "**9router URL**<br>"
+                    "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>Base URL of 9router endpoint.</span>"
+                )
+            else:
+                md = (
+                    "**OpenAI-Compatible URL**<br>"
+                    "<span style='font-size:0.85em;color:var(--body-text-color-subdued);'>Base URL of OpenAI-Compatible endpoint.</span>"
+                )
+            return (
+                gr.update(visible=is_compat),
+                gr.update(value=md),
                 gr.update(value=""),
-            ),
+            )
+
+        provider_selector.change(
+            fn=_update_endpoint_header_on_provider_change,
             inputs=provider_selector,
-            outputs=[endpoint_test_header_row, endpoint_connection_status],
+            outputs=[
+                endpoint_url_group,
+                endpoint_header_markdown,
+                endpoint_connection_status,
+            ],
             queue=False,
         )
 

@@ -1131,7 +1131,7 @@ def update_translation_ui(
         visible=is_router_or_compat,
         label=url_label,
         value=url_val,
-        info=url_info,
+        info="",
     )
     openai_compatible_key_visible_update = gr.update(
         visible=is_router_or_compat,
@@ -1636,6 +1636,7 @@ def fetch_and_update_compatible_models(
     current_model: Optional[str] = None,
     force_refresh: bool = False,
     provider: Optional[str] = None,
+    silent: bool = False,
 ):
     """Fetches models from a generic OpenAI-Compatible endpoint and updates dropdown.
 
@@ -1644,12 +1645,15 @@ def fetch_and_update_compatible_models(
         api_key: Optional API key for the endpoint.
         current_model: Currently selected model in the dropdown to preserve when available.
         force_refresh: If True, bypass cache and re-fetch models from the endpoint.
+        provider: Provider name for selecting remembered default model.
+        silent: If True, suppresses error warnings and avoids network requests if not cached.
     """
     verbose = get_saved_settings().get("verbose", False)
     if not url or not url.startswith(("http://", "https://")):
-        gr.Warning(
-            "Please enter a valid URL (starting with http:// or https://) for the OpenAI-Compatible endpoint."
-        )
+        if not silent:
+            gr.Warning(
+                "Please enter a valid URL (starting with http:// or https://) for the OpenAI-Compatible endpoint."
+            )
         return gr.update(choices=[], value=None)
 
     if (
@@ -1675,6 +1679,16 @@ def fetch_and_update_compatible_models(
             )
         )
         return gr.update(choices=cached_models, value=selected_comp_model)
+
+    if not force_refresh and silent:
+        saved_settings = get_saved_settings()
+        provider_models_dict = saved_settings.get(
+            "provider_models", DEFAULT_SETTINGS["provider_models"]
+        )
+        target_provider = provider or saved_settings.get("provider") or "OpenAI-Compatible"
+        remembered_comp_model = provider_models_dict.get(target_provider) or provider_models_dict.get("OpenAI-Compatible")
+        fallback_choices = [remembered_comp_model] if remembered_comp_model else []
+        return gr.update(choices=fallback_choices, value=remembered_comp_model)
 
     log_message(f"Fetching models from {url}", verbose=verbose)
     extracted_dep_name = None
@@ -1763,11 +1777,22 @@ def fetch_and_update_compatible_models(
             COMPATIBLE_MODEL_CACHE["models"] = fallback_models
             return gr.update(choices=fallback_models, value=extracted_dep_name)
         err_str = str(e)
-        if "401" in err_str or "Unauthorized" in err_str:
-            gr.Warning(f"Unauthorized (401) from {url}: Please check your API key.")
+        if not silent:
+            if "401" in err_str or "Unauthorized" in err_str:
+                gr.Warning(f"Unauthorized (401) from {url}: Please check your API key.")
+            else:
+                gr.Warning(f"Error fetching models from {url}: {e}")
         else:
-            gr.Warning(f"Error fetching models from {url}: {e}")
-        return gr.update(choices=[], value=None)
+            log_message(f"Silent fetch error from {url}: {e}", verbose=verbose)
+        
+        saved_settings = get_saved_settings()
+        provider_models_dict = saved_settings.get(
+            "provider_models", DEFAULT_SETTINGS["provider_models"]
+        )
+        target_provider = provider or saved_settings.get("provider") or "OpenAI-Compatible"
+        remembered_comp_model = provider_models_dict.get(target_provider) or provider_models_dict.get("OpenAI-Compatible")
+        fallback_choices = [remembered_comp_model] if remembered_comp_model else []
+        return gr.update(choices=fallback_choices, value=remembered_comp_model)
 
 
 def fetch_and_update_opencode_models(
