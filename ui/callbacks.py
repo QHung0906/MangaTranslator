@@ -13,7 +13,7 @@ from core.validation import (
     validate_mutually_exclusive_modes,
     validate_zip_file,
 )
-from utils.exceptions import CancellationError, ValidationError
+from utils.exceptions import CancellationError, ValidationError, TranslationError
 from utils.model_metadata import (
     FLUX_SDCPP_DIFFUSION_QUANTS,
     flux_sdcpp_text_encoder_quants,
@@ -938,13 +938,12 @@ def handle_translate_click(
                         _meta_data = json.load(f)
                     _meta_map = {int(e["index"]): e for e in _meta_data}
                     
+                    # Check if the indexes belong to this image's metadata
                     for _line in manual_txt_val.splitlines():
-                        _m = re.match(r"^(\d+):\s*(.*?)(?:\s*\|\|\s*(.*))?$", _line.strip())
+                        _m = re.match(r"^(?:\[(?:Bubble|OSB)\]\s*)?(\d+):\s*(?:\[(?:Bubble|OSB)\]\s*)?(.*?)(?:\s*\|\|\s*(.*))?$", _line.strip())
                         if _m:
                             _idx = int(_m.group(1))
-                            _content = _m.group(2).strip()
-                            _original_meta = _meta_map.get(_idx, {}).get("original", "").strip()
-                            if _content and _original_meta and _content != _original_meta:
+                            if _idx not in _meta_map:
                                 mismatch = True
                                 break
                 except Exception:
@@ -1003,7 +1002,7 @@ def handle_translate_click(
         return None, _status_update(cleaned), gr.update()
     except CancellationError:
         return None, _status_update("Translation cancelled by user."), gr.update()
-    except (ValidationError, FileNotFoundError, ValueError, logic.LogicError) as e:
+    except (ValidationError, FileNotFoundError, ValueError, logic.LogicError, TranslationError) as e:
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)
         
@@ -1015,6 +1014,7 @@ def handle_translate_click(
             if m:
                 _txt_content_str = m.group(1).strip()
                 txt_content = gr.update(value=_txt_content_str)
+                # Lần 1: Không lưu vào Translation_backup, chỉ nạp vào Textbox để sửa
                 # Simplify status message to be clean and user friendly
                 cleaned = "Đã sinh bản dịch mẫu. Hãy sửa nội dung sau dấu '||' rồi bấm Translate lại để vẽ lên ảnh."
                 
@@ -1278,7 +1278,9 @@ def handle_batch_click(
                             collected_blocks.append(f"{filename}:\n\n{template_str}")
             
             if collected_blocks:
-                batch_txt_update = gr.update(value="\n\n".join(collected_blocks))
+                full_batch_txt = "\n\n".join(collected_blocks)
+                batch_txt_update = gr.update(value=full_batch_txt)
+                # Lần 1: Không lưu vào Translation_backup, chỉ nạp vào Textbox để người dùng xem và chỉnh sửa
 
         # Re-get font path for success message (logic already validated it)
         font_dir_path = (
@@ -1304,7 +1306,7 @@ def handle_batch_click(
     except CancellationError:
         progress(1.0, desc="Cancelled")
         return None, _status_update("Batch process cancelled by user."), gr.update()
-    except (ValidationError, FileNotFoundError, ValueError, logic.LogicError) as e:
+    except (ValidationError, FileNotFoundError, ValueError, logic.LogicError, TranslationError) as e:
         progress(1.0, desc="Error occurred")
         cleaned = _clean_error_message(e)
         gr.Error(cleaned)

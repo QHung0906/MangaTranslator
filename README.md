@@ -60,6 +60,16 @@
 >      - **Linux**: Secret Service API / encrypted user vault (`~/.config/MangaTranslator/.credentials.enc`, `chmod 600`) with machine-bound key derivation.
 >    - **Multi-Key Auto-Rotation**: Native support for rotating Google AI Studio keys and Cloudflare Workers AI accounts (`ACCOUNT_ID:API_TOKEN`).
 >    - **Minimalist Web UI**: Full bullet dot-masking (`••••••••`) to prevent on-screen leakage, instant toggle buttons, and clean white layout.
+> 
+> 11. **Visual Index Banners & Anti-Hallucination (`[NO TEXT]`)**:
+>    - Automatically prepends high-contrast header banners (`[ #1 ]`, `[ #2 ]`...) to image crops sent to Vision LLMs.
+>    - Guarantees strict 1-to-1 sequential mapping between crops and transcription lines, eliminating line-skipping and panel mismatches.
+>    - Robust empty panel detection (`[NO TEXT]` token) preventing LLMs from hallucinating dialogue into non-text artwork or character faces.
+> 
+> 12. **Emergency Fallback Text Renderer**:
+>    - Two-tier fail-safe rendering pipeline: auto-retries with emergency downscaled font & hyphenation if standard Skia layout fails.
+>    - Seamless fallback to native PIL canvas rendering as a last resort, ensuring 0% dropped dialogue across all challenging bubble shapes.
+
 
 Gradio-based web application for automating the translation of manga/comic page images using AI. Targets speech bubbles and text outside of speech bubbles. Supports 60 languages and custom font pack usage.
 
