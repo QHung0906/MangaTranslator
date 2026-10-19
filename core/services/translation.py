@@ -80,6 +80,71 @@ TRANSLATION_PATTERN = re.compile(
 )
 
 
+def add_visual_index_banner(image_cv: np.ndarray, index: int) -> np.ndarray:
+    """Adds a prominent top header banner containing '[ #index ]' above the crop.
+
+    This ensures vision LLMs have an unambiguous, unmissable visual anchor for 1-to-1
+    sequential indexing without obscuring any Japanese text inside the crop.
+    """
+    if image_cv is None or image_cv.size == 0:
+        return image_cv
+
+    h, w = image_cv.shape[:2]
+    # Header height proportional to width, minimum 28px, maximum 60px
+    banner_h = max(28, min(60, int(w * 0.12)))
+    
+    # Dark banner background
+    banner = np.full((banner_h, w, 3), (25, 25, 25), dtype=np.uint8)
+    
+    # Calculate text scale
+    text = f"[ #{index} ]"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.5, min(1.2, banner_h / 38.0))
+    thickness = max(1, int(round(font_scale * 2.2)))
+    
+    # Center text in banner
+    (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    text_x = max(4, (w - text_w) // 2)
+    text_y = (banner_h + text_h) // 2 - 2
+    
+    # Draw text: white with black outline for maximum contrast
+    cv2.putText(banner, text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(banner, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    
+    # Thin divider line at the bottom of the banner
+    cv2.line(banner, (0, banner_h - 1), (w - 1, banner_h - 1), (80, 80, 80), 1)
+    
+    # Ensure image_cv is 3-channel
+    if image_cv.ndim == 2:
+        image_cv = cv2.cvtColor(image_cv, cv2.COLOR_GRAY2BGR)
+    elif image_cv.ndim == 3 and image_cv.shape[2] == 4:
+        image_cv = cv2.cvtColor(image_cv, cv2.COLOR_BGRA2BGR)
+        
+    return np.vstack([banner, image_cv])
+
+
+def apply_visual_banners_to_b64_list(images_b64: List[str], mime_types: List[str]) -> List[str]:
+    """Applies visual index banners ([ #1 ], [ #2 ]...) to a list of base64 crop images."""
+    bannered_list = []
+    for i, img_b64 in enumerate(images_b64):
+        try:
+            raw_bytes = base64.b64decode(img_b64)
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            crop_cv = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if crop_cv is not None:
+                bannered_cv = add_visual_index_banner(crop_cv, i + 1)
+                mime = mime_types[i] if i < len(mime_types) else "image/jpeg"
+                ext = ".png" if "png" in mime else ".jpg"
+                success, buf = cv2.imencode(ext, bannered_cv)
+                if success:
+                    bannered_list.append(base64.b64encode(buf).decode("utf-8"))
+                    continue
+        except Exception:
+            pass
+        bannered_list.append(img_b64)
+    return bannered_list
+
+
 def _build_system_prompt_ocr(
     input_language: Optional[str],
     reading_direction: str,
@@ -99,6 +164,8 @@ You are an expert manga OCR transcriber.
 Your sole purpose is to accurately transcribe the original text from a series of provided images. You must not translate, interpret, or add commentary.
 
 ## CORE RULES
+- **Visual Index Banners:** Each image crop features a dark header banner at the very top displaying `[ #i ]` (e.g. `[ #1 ]`, `[ #2 ]`...). Line `i:` MUST transcribe the text from the crop with header `[ #i ]`.
+- **Ignore Header Text:** Do NOT transcribe the header text `[ #i ]` itself. Transcribe only the manga text inside the crop below the banner.
 - **Reading Context:** The image crops are presented in a {direction} reading order. Do not reorder them.
 - **Transcription Policy:** Preserve all original punctuation, ellipses, and casing. Collapse multi-line text into a single line, separated by a single space.
 - **Ignore Policy:** Ignore all non-text visual elements (borders, tails, watermarks, etc.).
@@ -108,7 +175,8 @@ Your sole purpose is to accurately transcribe the original text from a series of
 - **Quotes:** Do not wrap the transcribed text in quotation marks unless they are explicitly present in the image.
 - **Edge Cases:**
   - If an image contains standalone periods/ellipses, you must return it exactly as it appears.
-  - If text is indecipherable, you must return the exact token: `[OCR FAILED]`.
+  - If an image contains NO text (e.g. only drawings, artwork, blank space, faces, or screentone patterns), you must return the exact token: `[NO TEXT]` (never hallucinate, invent dialogue, or borrow text from other panels).
+  - If text is present but indecipherable, you must return the exact token: `[OCR FAILED]`.
 
 ## OUTPUT SCHEMA
 - You must return your response as a single numbered list with exactly one line per input image.
@@ -177,10 +245,12 @@ def _build_system_prompt_translation(
     if mode == "two-step":
         edge_cases = """- **Edge Cases:**
   - If an input line contains standalone periods/ellipses, you must return it exactly as it appears.
+  - If an input line is the exact token `[NO TEXT]` or empty, you must output the exact token: `[NO TEXT]`.
   - If an input line is the exact token `[OCR FAILED]`, you must output it unchanged."""
     else:
         edge_cases = """- **Edge Cases:**
   - If an image contains standalone periods/ellipses, you must return it exactly as it appears.
+  - If an image contains NO text (e.g. only drawings, artwork, faces, or blank space), output the exact token: `[NO TEXT]`. Never borrow text from other locations.
   - If text is indecipherable, you must return the exact token: `[OCR FAILED]`."""
 
     previous_context_rule = ""
@@ -1840,8 +1910,9 @@ def _perform_llm_ocr(
         List of extracted text strings, or early return with failure list
     """
     total_elements = len(images_b64)
+    bannered_images_b64 = apply_visual_banners_to_b64_list(images_b64, mime_types)
     ocr_parts = []
-    for i, img_b64 in enumerate(images_b64):
+    for i, img_b64 in enumerate(bannered_images_b64):
         mime_type = mime_types[i] if i < len(mime_types) else "image/jpeg"
         bubble_part = {"inline_data": {"mime_type": mime_type, "data": img_b64}}
         supports_per_part_res = (
@@ -1997,7 +2068,8 @@ def call_translation_api_batch(
     supports_per_part_res = is_gemini_3 or provider == "SpaceXAI"
 
     base_parts = []
-    for i, img_b64 in enumerate(images_b64):
+    bannered_base_images_b64 = apply_visual_banners_to_b64_list(images_b64, mime_types)
+    for i, img_b64 in enumerate(bannered_base_images_b64):
         mime_type = mime_types[i] if i < len(mime_types) else "image/jpeg"
         bubble_part = {"inline_data": {"mime_type": mime_type, "data": img_b64}}
         if supports_per_part_res:
