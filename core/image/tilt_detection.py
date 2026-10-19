@@ -316,7 +316,8 @@ def detect_crop_tilt_angle(
 
         # Positive OpenCV rotation deskews Skia counter-clockwise tilt
         rot_center = (pad_x + w / 2.0, pad_y + h / 2.0)
-        for s_deg in range(-int(max_tilt_deg), int(max_tilt_deg) + 1):
+        sweep_deg = max(45, int(max_tilt_deg))
+        for s_deg in range(-sweep_deg, sweep_deg + 1):
             m = cv2.getRotationMatrix2D(rot_center, float(s_deg), 1.0)
             rot = cv2.warpAffine(padded_mask, m, (diag, diag), flags=cv2.INTER_NEAREST)
             col_counts = np.sum(rot > 0, axis=0).astype(np.float64)
@@ -330,6 +331,8 @@ def detect_crop_tilt_angle(
             best_s, best_conc = max(scores, key=lambda sc: sc[1])
             gain = best_conc / max(base_conc, 1e-6)
             if gain >= 1.03 and abs(best_s) >= deadband_deg:
+                if abs(best_s) > 25.0:
+                    return 0.0, 0.0, oriented_dims, "vertical"
                 conf = max(0.60, (gain - 1.0) / 0.12)
                 return float(best_s), conf, oriented_dims, "vertical"
 
@@ -352,6 +355,8 @@ def detect_crop_tilt_angle(
 
             if abs(theta_row - theta_pca) <= 8.0:
                 cand_angle = (theta_row + theta_pca) / 2.0
+                if abs(cand_angle) > 25.0:
+                    return 0.0, 0.0, oriented_dims, "vertical"
                 clamped = max(-max_tilt_deg, min(max_tilt_deg, cand_angle))
                 final_deg = 0.0 if abs(clamped) < deadband_deg else clamped
                 return float(final_deg), 0.75, oriented_dims, "vertical"
@@ -416,6 +421,9 @@ def detect_crop_tilt_angle(
 
     if abs(cand_angle) < deadband_deg:
         return 0.0, 0.9, oriented_dims, tilt_axis
+    if abs(cand_angle) > 25.0:
+        # False geometric tilt caused by spiky bubble edges or speed lines (> 25 deg)
+        return 0.0, 0.0, oriented_dims, tilt_axis
 
     # Projection-gain verification (geometric sign & angle proof)
     def calc_concentration(img_bin: np.ndarray) -> tuple[float, float]:
@@ -494,6 +502,8 @@ def compute_effective_tilt_angle(
     if not follow_tilt:
         return 0.0
     if float(tilt_conf) < float(confidence_threshold):
+        return 0.0
+    if abs(float(tilt_deg)) > 25.0:
         return 0.0
     clamped = max(-float(max_tilt_deg), min(float(max_tilt_deg), float(tilt_deg)))
     if abs(clamped) < float(min_tilt_deg):

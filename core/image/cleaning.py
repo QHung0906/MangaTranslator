@@ -893,9 +893,14 @@ def clean_speech_bubbles(
                                             )
                                             if (
                                                 tilt_conf >= auto_rotate_confidence_threshold
-                                                and abs(angle_cand) >= 3.0
+                                                and 3.0 <= abs(angle_cand) <= 25.0
                                             ):
                                                 rotation_deg = float(angle_cand)
+                                            elif abs(angle_cand) > 25.0:
+                                                log_message(
+                                                    f"Detection {detection.get('bbox')}: text tilt {angle_cand:.1f}° ignored (>25.0° spike/speedline noise)",
+                                                    verbose=verbose,
+                                                )
                                                 log_message(
                                                     f"Detection {detection.get('bbox')}: text tilt detected {rotation_deg:.1f}° (conf: {tilt_conf:.2f})",
                                                     verbose=verbose,
@@ -906,17 +911,10 @@ def clean_speech_bubbles(
                             verbose=verbose,
                         )
 
-                    # 2. Fallback: Estimate tilt from bubble boundary mask
-                    if abs(rotation_deg) < 0.01 and base_mask is not None:
-                        try:
-                            rotation_deg = estimate_mask_rotation_angle(
-                                base_mask, verbose=verbose
-                            )
-                        except Exception as e:
-                            log_message(
-                                f"Rotation estimation failed for {detection.get('bbox')}: {e}",
-                                verbose=verbose,
-                            )
+                    # Mask boundary rotation fallback intentionally removed:
+                    # oval/elliptical bubbles are often tilted for artistic framing,
+                    # but dialogue text inside remains upright (0 deg).
+                    # Rotation is strictly driven by actual text ink tilt above.
 
                 processed_bubbles.append(
                     {
@@ -1247,15 +1245,12 @@ def retry_cleaning_with_otsu(
                     angle_cand, tilt_conf, _, _ = detect_crop_tilt_angle(
                         text_crop, is_dark_text=True
                     )
-                    if tilt_conf >= 0.5 and abs(angle_cand) >= 3.0:
+                    if tilt_conf >= 0.5 and 3.0 <= abs(angle_cand) <= 25.0:
                         rotation_deg = float(angle_cand)
             except Exception:
                 pass
-        if abs(rotation_deg) < 0.01 and base_mask is not None:
-            try:
-                rotation_deg = estimate_mask_rotation_angle(base_mask, verbose=verbose)
-            except Exception:
-                rotation_deg = 0.0
+        # Mask boundary rotation fallback intentionally omitted:
+        # oval/elliptical bubble masks must not rotate upright dialogue text.
 
     return {
         "mask": final_mask,

@@ -988,7 +988,7 @@ def translate_and_render(
                         _line = _line.strip()
                         if not _line:
                             continue
-                        _m = re.match(r"^(\d+):\s*(.*?)(?:\s*\|\|\s*(.*))?$", _line)
+                        _m = re.match(r"^(?:\[(?:Bubble|OSB)\]\s*)?(\d+):\s*(?:\[(?:Bubble|OSB)\]\s*)?(.*?)(?:\s*\|\|\s*(.*))?$", _line)
                         if _m:
                             _idx = int(_m.group(1))
                             _current_idx = _idx
@@ -1010,9 +1010,10 @@ def translate_and_render(
                                     "[OCR FAILED]",
                                     "[TRANSLATION FAILED]",
                                     "[NO TRANSLATION]",
+                                    "[NO TEXT]",
                                     "[Empty response / no content]",
                                 )
-                                or _content.strip() == "[OCR FAILED]"
+                                or _content.strip() in ("[OCR FAILED]", "[NO TEXT]")
                             )
                             if _is_skip_text:
                                 _bbox = _meta_map.get(_idx, {}).get("bbox")
@@ -1509,7 +1510,11 @@ def translate_and_render(
                         for _i, _bubble in enumerate(sorted_bubble_data):
                             _bbox = [int(round(v)) for v in _bubble.get("bbox", [0, 0, 0, 0])]
                             _clean_ocr = " ".join(_api_ocr_texts[_i].splitlines())
-                            _txt_lines.append(f"{_i + 1}: {_clean_ocr} || {_api_translations[_i]}")
+                            _is_osb = _bubble.get("is_outside_text", False)
+                            _tag = "[OSB]" if _is_osb else "[Bubble]"
+                            _line_str = f"{_tag} {_i + 1}: {_clean_ocr} || {_api_translations[_i]}"
+                            _txt_lines.append(_line_str)
+                            log_message(_line_str, always_print=True)
                             _meta_entries.append({
                                 "index": _i + 1,
                                 "bbox": _bbox,
@@ -1745,6 +1750,8 @@ def translate_and_render(
                     invalid_translation_values = {
                         "[OCR FAILED]",
                         "[Empty response / no content]",
+                        "[NO TEXT]",
+                        "[NO TRANSLATION]",
                     }
                     for i, bubble in enumerate(sorted_bubble_data):
                         bubble["translation"] = translated_texts[i]
@@ -1917,7 +1924,15 @@ def translate_and_render(
                             vertical_stack = False
                             rotation_deg = 0.0
                             if config.rendering.auto_rotate_text and render_info:
-                                rotation_deg = float(render_info.get("rotation_deg", 0.0) or 0.0)
+                                raw_rot = float(render_info.get("rotation_deg", 0.0) or 0.0)
+                                if abs(raw_rot) > 25.0:
+                                    log_message(
+                                        f"Bubble tilt {raw_rot:.1f}° exceeds max threshold (25.0°); treating as false spike/speedline tilt -> 0.0°",
+                                        always_print=True,
+                                    )
+                                    rotation_deg = 0.0
+                                else:
+                                    rotation_deg = raw_rot
 
                         # Latin languages use hyphenation; Korean/Thai use
                         # no-hyphen emergency breaks under the same user setting.
@@ -2274,6 +2289,59 @@ def translate_and_render(
                                 )
                                 rendered_image = pil_cleaned_image
                                 success = False
+
+                        if not success:
+                            # Emergency render fallback for speech bubbles:
+                            # 1. Try with emergency_config (min_font_size=6, line_spacing_mult=0.9, hyphenate=True)
+                            try:
+                                log_message(
+                                    f"Bubble render failed for {bbox}, retrying with emergency minimum font size",
+                                    verbose=verbose,
+                                )
+                                emergency_config = RenderingConfig(
+                                    min_font_size=6,
+                                    max_font_size=max(8, min_font),
+                                    line_spacing_mult=0.9,
+                                    use_ligatures=False,
+                                    hyphenate_before_scaling=True,
+                                    supersampling_factor=1,
+                                    padding_pixels=max(1.0, padding_pixels * 0.5),
+                                )
+                                rendered_image = render_text_skia(
+                                    pil_image=pil_cleaned_image,
+                                    text=text,
+                                    bbox=bbox,
+                                    font_dir=font_dir,
+                                    cleaned_mask=cleaned_mask,
+                                    bubble_color_bgr=bubble_color_bgr,
+                                    config=emergency_config,
+                                    verbose=verbose,
+                                    bubble_id=str(i + 1),
+                                    rotation_deg=0.0,
+                                    vertical_stack=False,
+                                    text_color_rgb=text_color_rgb,
+                                    raise_on_safe_error=False,
+                                    fallback_padding_pixels=0.0,
+                                )
+                                success = True
+                            except Exception as e_em:
+                                log_message(
+                                    f"Emergency render fallback failed: {e_em}; drawing text with PIL",
+                                    verbose=verbose,
+                                )
+                                # 2. Last-resort fallback: PIL direct text draw so text is never dropped
+                                try:
+                                    rendered_image = pil_cleaned_image.copy()
+                                    draw = ImageDraw.Draw(rendered_image)
+                                    is_dark_bubble = (
+                                        (0.299 * bubble_color_bgr[2] + 0.587 * bubble_color_bgr[1] + 0.114 * bubble_color_bgr[0]) < 128
+                                        if bubble_color_bgr else False
+                                    )
+                                    draw_col = text_color_rgb if text_color_rgb else ((255, 255, 255) if is_dark_bubble else (0, 0, 0))
+                                    draw.text((bbox[0], bbox[1]), text, fill=draw_col)
+                                    success = True
+                                except Exception as e_pil:
+                                    log_message(f"PIL fallback failed for {bbox}: {e_pil}", always_print=True)
 
                         if success:
                             pil_cleaned_image = rendered_image

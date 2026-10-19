@@ -169,7 +169,7 @@ def _build_outside_text_data(
                     is_dark_text=original_text_colors.get(raw_bbox_tuple, True),
                     max_side=osb_tilt_estimation_side_pixels,
                     deadband_deg=getattr(config.outside_text, "osb_min_tilt_deg", 3.0),
-                    max_tilt_deg=getattr(config.outside_text, "osb_max_tilt_deg", 20.0),
+                    max_tilt_deg=45.0,
                 )
 
         try:
