@@ -568,11 +568,11 @@ def create_layout(
                             elem_id="translator_status_message",
                         )
                         manual_txt_editor = gr.Textbox(
-                            label="✏️ Hộp dịch thủ công (TXT) / Manual Translation Box",
+                            label="Manual Translation Box",
                             interactive=True,
                             lines=15,
                             visible=saved_settings.get("manual_json_translation", False),
-                            placeholder="Nội dung file dịch sẽ hiển thị ở đây sau khi bạn nhấn Translate lần đầu ở chế độ dịch thủ công...",
+                            placeholder="Translation template will appear here after clicking Translate in manual mode...",
                             elem_id="manual_txt_editor",
                         )
                         with gr.Row():
@@ -624,14 +624,14 @@ def create_layout(
                                 visible=False,
                             )
                         with gr.Accordion(
-                            "🤖 Trợ lý AI Dịch Batch (Interactive Gemini Session)",
+                            "Gemini AI Assistant",
                             open=True,
                             elem_id="batch_ai_assistant_accordion",
                             visible=saved_settings.get("manual_json_translation", False),
                         ) as batch_ai_assistant_accordion:
                             with gr.Row():
                                 batch_chat_model_selector = gr.Dropdown(
-                                    label="Chọn Model Gemini",
+                                    label="Gemini Model",
                                     choices=[
                                         "gemini-3.8-flash",
                                         "gemini-3.7-flash",
@@ -650,30 +650,30 @@ def create_layout(
                                 )
                                 with gr.Column(scale=3):
                                     batch_chat_status = gr.Markdown(
-                                        "**Model đã chọn:** `gemini-3.8-flash`"
+                                        "**Active Model:** `gemini-3.8-flash`"
                                     )
                             batch_chat_history = gr.Chatbot(
-                                label="Hội thoại với Gemini (Gems Persona 18+)",
+                                label="Gemini Chat",
                                 height=380,
                                 elem_id="batch_chat_history",
                             )
                             with gr.Row():
                                 batch_chat_input = gr.Textbox(
-                                    label="Tin nhắn / Yêu cầu",
-                                    placeholder="VD: 'Dịch 10 trang đầu', 'Sửa nhân vật A xưng anh với B'...",
+                                    label="Message",
+                                    placeholder="Type a message or instruction...",
                                     scale=4,
                                     lines=1,
                                     elem_id="batch_chat_input",
                                 )
-                                batch_chat_send_btn = gr.Button("Gửi", variant="primary", scale=1)
-                                batch_chat_cancel_btn = gr.Button("⏹️ Hủy yêu cầu", variant="stop", scale=1)
+                                batch_chat_send_btn = gr.Button("Send", variant="primary", scale=1)
+                                batch_chat_cancel_btn = gr.Button("Stop", variant="stop", scale=1)
                             with gr.Row():
-                                batch_chat_auto_all_btn = gr.Button("🚀 Tự động dịch toàn bộ (10 trang/lần)", variant="primary")
-                                batch_chat_quick_check_role_btn = gr.Button("👥 Kiểm tra xưng hô", variant="secondary")
+                                batch_chat_auto_all_btn = gr.Button("Auto Translate All", variant="primary")
+                                batch_chat_quick_check_role_btn = gr.Button("Check Addressing", variant="secondary")
                             with gr.Row():
-                                batch_chat_init_btn = gr.Button("📤 Nạp OCR từ Hộp Dịch vào AI", variant="secondary")
-                                batch_chat_apply_btn = gr.Button("📥 Điền kết quả từ AI vào Hộp Dịch", variant="primary")
-                                batch_chat_reset_btn = gr.Button("🔄 Đặt lại Session", variant="secondary")
+                                batch_chat_init_btn = gr.Button("Load OCR to AI", variant="secondary")
+                                batch_chat_apply_btn = gr.Button("Apply to Translation Box", variant="primary")
+                                batch_chat_reset_btn = gr.Button("Reset Session", variant="secondary")
                         batch_special_instructions = gr.Textbox(
                             label="Special Instructions",
                             placeholder="Give the LLM optional context, formatting instructions, etc.",
@@ -779,11 +779,11 @@ def create_layout(
                             elem_id="batch_status_message",
                         )
                         batch_manual_txt_editor = gr.Textbox(
-                            label="✏️ Hộp dịch thủ công Batch (TXT) / Batch Manual Translation Box",
+                            label="Batch Manual Translation Box",
                             interactive=True,
                             lines=20,
                             visible=saved_settings.get("manual_json_translation", False),
-                            placeholder="Nội dung bản dịch mẫu của cả batch sẽ hiển thị ở đây sau khi bạn nhấn Start Batch Translating...",
+                            placeholder="Batch translation templates will appear here after clicking Start Batch Translating...",
                             elem_id="batch_manual_txt_editor",
                         )
                         with gr.Row():
@@ -1068,14 +1068,11 @@ def create_layout(
                                 elem_id="google_api_key",
                             )
                             manual_json_translation = gr.Checkbox(
-                                label="✏️ Manual Edit (TXT) / Dịch thủ công",
+                                label="Manual Edit (TXT)",
                                 value=saved_settings.get("manual_json_translation", False),
                                 visible=(config_initial_provider == "Google"),
                                 elem_id="manual_json_translation",
-                                info=(
-                                    "Lần đầu: Tạo file JSON chứa bản dịch AI tham khảo để bạn chỉnh sửa. "
-                                    "Lần sau: Đọc bản dịch thủ công từ file JSON đó để vẽ lên ảnh (không gọi API)."
-                                ),
+                                info="Pass 1: Generate editable translation templates. Pass 2: Render using edited translations (no API calls).",
                             )
                             openai_api_key = gr.Textbox(
                                 label="OpenAI API Key",
@@ -2425,15 +2422,15 @@ def create_layout(
                                 outside_text_osb_font_pack = gr.Dropdown(
                                     value=saved_osb_font_pack,
                                     choices=[""] + font_choices,
-                                    label="Text Font (Ngoài khung / OSB)",
-                                    info="Font để vẽ chữ ngoài khung thoại / SFX (để trống sẽ dùng theo Text Font)",
+                                    label="Text Font (Off-Bubble / SFX)",
+                                    info="Font for sound effects and text outside speech bubbles (defaults to Text Font if blank)",
                                 )
                                 batch_font_dropdown = gr.Dropdown(
                                     choices=font_choices,
-                                    label="Text Font (Khung thoại / Bubble)",
+                                    label="Text Font (Dialogue Bubble)",
                                     value=batch_default_font,
                                     filterable=False,
-                                    info="Font mặc định cho văn bản dịch trong khung thoại (Bubble)",
+                                    info="Default font for text inside speech bubbles",
                                 )
                                 outside_text_osb_max_font_size = gr.Slider(
                                     5,

@@ -257,29 +257,29 @@ def parse_and_validate_batch_manual(
     total_lines, trans_lines, missing_by_file, asian_bleed_by_file = validate_batch_translations_stats(updated_txt)
 
     if total_lines == 0:
-        return updated_txt, "⚠️ Không tìm thấy dòng thoại nào trong Hộp dịch Batch."
+        return updated_txt, "No dialogue lines found in Batch Manual Box."
 
     all_good = not missing_by_file and not asian_bleed_by_file
     if all_good:
-        status_md = f"✅ **Đồng bộ hoàn tất 100%!** Đã dịch đầy đủ **{trans_lines}/{total_lines}** câu thoại, sạch hoàn toàn lỗi chữ Hán/Hàn."
+        status_md = f"**Sync complete (100%)!** Translated **{trans_lines}/{total_lines}** lines cleanly."
     else:
         percent = round((trans_lines / total_lines) * 100, 1)
         issues = []
         if missing_by_file:
             lines_info = []
             for fname, missing_idxs in missing_by_file.items():
-                lines_info.append(f"• `{fname}`: thiếu dòng {', '.join(map(str, missing_idxs))}")
-            issues.append(f"**Thiếu bản dịch:**\n" + "\n".join(lines_info[:6]))
+                lines_info.append(f"• `{fname}`: missing lines {', '.join(map(str, missing_idxs))}")
+            issues.append(f"**Missing translations:**\n" + "\n".join(lines_info[:6]))
 
         if asian_bleed_by_file:
             bleed_info = []
             for fname, bleed_idxs in asian_bleed_by_file.items():
-                bleed_info.append(f"• `{fname}`: dính chữ chưa dịch tại dòng {', '.join(map(str, bleed_idxs))}")
-            issues.append(f"**Dính chữ chưa dịch hết:**\n" + "\n".join(bleed_info[:6]))
+                bleed_info.append(f"• `{fname}`: untranslated characters at line {', '.join(map(str, bleed_idxs))}")
+            issues.append(f"**Untranslated character bleed:**\n" + "\n".join(bleed_info[:6]))
 
         details = "\n\n".join(issues)
         status_md = (
-            f"⚠️ **Đã đồng bộ {trans_lines}/{total_lines} câu ({percent}%).**\n{details}"
+            f"**Synced {trans_lines}/{total_lines} lines ({percent}%).**\n{details}"
         )
 
     return updated_txt, status_md
