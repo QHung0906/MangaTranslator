@@ -5,6 +5,85 @@ from typing import Any, Dict, List, Optional, Tuple
 def natural_sort_key(s: str) -> List[Any]:
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
 
+def _clean_entry_content(
+    content: str,
+    tag: Optional[str] = None,
+    expected_idx: Optional[int] = None,
+) -> Tuple[Optional[str], str]:
+    """
+    Cleans entry content by stripping duplicate leading numbers ('1: ') and redundant
+    tags ([Bubble], [OSB]), returning (tag, clean_content).
+    """
+    text = content.strip()
+    current_tag = tag
+    while True:
+        m_tag = re.match(r"^\[(Bubble|OSB)\]\s*", text, re.IGNORECASE)
+        if m_tag:
+            if not current_tag:
+                current_tag = "OSB" if m_tag.group(1).upper() == "OSB" else "Bubble"
+            text = text[m_tag.end():].strip()
+            continue
+        m_num = re.match(r"^(\d+)\s*:\s*", text)
+        if m_num:
+            num_val = int(m_num.group(1))
+            rest = text[m_num.end():].strip()
+            if (
+                (expected_idx is not None and num_val == expected_idx)
+                or re.match(r"^\[(Bubble|OSB)\]", rest, re.IGNORECASE)
+                or (current_tag is not None and (expected_idx is None or num_val == expected_idx))
+            ):
+                text = rest
+                continue
+        break
+    if current_tag:
+        current_tag = "OSB" if current_tag.upper() == "OSB" else "Bubble"
+    return current_tag, text
+
+
+def parse_line_index_and_content(line: str) -> Tuple[Optional[str], Optional[int], str]:
+    """
+    Parses a dialogue line into (tag, index, content).
+    Handles all formats reliably:
+    - "1: [Bubble] 1: content" or "1: [Bubble] content"
+    - "[Bubble] 1: content" or "[OSB] 2: 22:32 ||"
+    - "1: content"
+    Does NOT swallow numbers that belong to content (e.g. '22:32').
+    """
+    text = line.strip()
+    
+    # 1. Outer index followed by tag: "1: [Bubble] 1: content" or "1: [Bubble] content"
+    m = re.match(
+        r"^(?P<outer_idx>\d+)\s*:\s*\[(?P<tag>Bubble|OSB)\]\s*(?:(?P<inner_idx>\d+)\s*:\s*)?(?P<content>.*)$",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        tag = "OSB" if m.group("tag").upper() == "OSB" else "Bubble"
+        idx = int(m.group("inner_idx") or m.group("outer_idx"))
+        _, clean = _clean_entry_content(m.group("content"), tag, expected_idx=idx)
+        return tag, idx, clean
+
+    # 2. Tag followed by index: "[Bubble] 1: content" or "[OSB] 2: 22:32 ||"
+    m = re.match(
+        r"^\[(?P<tag>Bubble|OSB)\]\s*(?P<idx>\d+)\s*:\s*(?P<content>.*)$",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        tag = "OSB" if m.group("tag").upper() == "OSB" else "Bubble"
+        idx = int(m.group("idx"))
+        _, clean = _clean_entry_content(m.group("content"), tag, expected_idx=idx)
+        return tag, idx, clean
+
+    # 3. Simple index: "1: content"
+    m = re.match(r"^(?P<idx>\d+)\s*:\s*(?P<content>.*)$", text)
+    if m:
+        idx = int(m.group("idx"))
+        tag, clean = _clean_entry_content(m.group("content"), None, expected_idx=idx)
+        return tag, idx, clean
+
+    return None, None, text
+
 
 def parse_chat_response_to_batch_manual(
     chat_text: str,
@@ -15,8 +94,8 @@ def parse_chat_response_to_batch_manual(
     the batch manual translation text formatted as:
     
     001.png:
-    1: [Original] || [Translated]
-    2: [Original] || [Translated]
+    [Bubble] 1: [Original] || [Translated]
+    [OSB] 2: [Original] || [Translated]
 
     Args:
         chat_text: Raw output from AI chat session.
@@ -26,7 +105,7 @@ def parse_chat_response_to_batch_manual(
         Consolidated and updated batch manual translation text.
     """
     # First, parse existing manual translations into structured dict
-    file_translations: Dict[str, Dict[int, str]] = {}
+    file_translations: Dict[str, Dict[int, Tuple[Optional[str], str]]] = {}
     
     def _parse_lines_into_dict(text: str):
         current_file = None
@@ -35,7 +114,6 @@ def parse_chat_response_to_batch_manual(
             if not line:
                 continue
 
-            # Header like "001.png:" or "001.jpg :" or "### 001.png"
             m_header = re.match(
                 r"^(?:#{1,4}\s*)?([a-zA-Z0-9_\-.]+\.(?:png|jpg|jpeg|webp))\s*:?$",
                 line,
@@ -47,33 +125,46 @@ def parse_chat_response_to_batch_manual(
                     file_translations[current_file] = {}
                 continue
 
-            # Inline format "001.png: 1: orig || trans"
-            m_inline = re.match(
-                r"^([a-zA-Z0-9_\-.]+\.(?:png|jpg|jpeg|webp))\s*:\s*(\d+)\s*:\s*(.*?)$",
+            tag, idx, content = parse_line_index_and_content(line)
+            if idx is not None and current_file:
+                file_translations[current_file][idx] = (tag, content)
+
+    # First, record existing tags from existing manual txt
+    existing_tags: Dict[str, Dict[int, str]] = {}
+    if existing_batch_manual_txt:
+        _parse_lines_into_dict(existing_batch_manual_txt)
+        for f_name, entries in file_translations.items():
+            existing_tags[f_name] = {}
+            for idx, (t, _) in entries.items():
+                if t:
+                    existing_tags[f_name][idx] = t
+
+    # Parse chat text and merge
+    def _parse_chat_lines_into_dict(text: str):
+        current_file = None
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            m_header = re.match(
+                r"^(?:#{1,4}\s*)?([a-zA-Z0-9_\-.]+\.(?:png|jpg|jpeg|webp))\s*:?$",
                 line,
                 re.IGNORECASE,
             )
-            if m_inline:
-                f_name = m_inline.group(1).strip()
-                idx = int(m_inline.group(2))
-                content = m_inline.group(3).strip()
-                if f_name not in file_translations:
-                    file_translations[f_name] = {}
-                file_translations[f_name][idx] = content
+            if m_header:
+                current_file = m_header.group(1).strip()
+                if current_file not in file_translations:
+                    file_translations[current_file] = {}
                 continue
 
-            # Numbered line like "1: orig || trans" under current file
-            m_num = re.match(r"^(\d+)\s*:\s*(.*?)$", line)
-            if m_num and current_file:
-                idx = int(m_num.group(1))
-                content = m_num.group(2).strip()
-                file_translations[current_file][idx] = content
+            tag, idx, content = parse_line_index_and_content(line)
+            if idx is not None and current_file:
+                if not tag and current_file in existing_tags and idx in existing_tags[current_file]:
+                    tag = existing_tags[current_file][idx]
+                file_translations[current_file][idx] = (tag, content)
 
-    if existing_batch_manual_txt:
-        _parse_lines_into_dict(existing_batch_manual_txt)
-
-    # Now parse chat text and overwrite/add entries
-    _parse_lines_into_dict(chat_text)
+    _parse_chat_lines_into_dict(chat_text)
 
     # Reconstruct the consolidated string sorted naturally by filename
     result_blocks = []
@@ -81,7 +172,13 @@ def parse_chat_response_to_batch_manual(
         lines = [f"{f_name}:"]
         items = file_translations[f_name]
         for idx in sorted(items.keys()):
-            lines.append(f"{idx}: {items[idx]}")
+            tag, content = items[idx]
+            if not tag and f_name in existing_tags and idx in existing_tags[f_name]:
+                tag = existing_tags[f_name][idx]
+            if tag:
+                lines.append(f"[{tag}] {idx}: {content}")
+            else:
+                lines.append(f"{idx}: {content}")
         result_blocks.append("\n".join(lines))
 
     return "\n\n".join(result_blocks)
@@ -100,23 +197,42 @@ JAPANESE_KANA_SFX_REGEX = re.compile(
 )
 
 
-def is_ignorable_original_line(orig_text: str) -> bool:
+def is_ignorable_original_line(orig_text: str, tag: Optional[str] = None) -> bool:
     """
     Returns True if the original line is:
     1. Empty, pure symbols, or OCR failed.
-    2. Pure Japanese Kana SFX/moans/interjections (e.g. ビクッ, ん, あっ♥, はぁ, ふぅ).
-       Per rules: "TIẾNG NHẬT: KHÔNG DỊCH từ tượng thanh / cảm thán / rên rỉ -> để trống sau ||".
+    2. Pure Japanese Kana SFX/moans/interjections (e.g. ビクッ, ん, あっ♥, はぁ, ふぅ) ONLY when outside bubbles ([OSB]).
+       - If tag is 'Bubble': Japanese Kana SFX must be translated to expressive Vietnamese -> NOT ignorable.
+       - If tag is 'OSB' or None: Keep blank per rules -> ignorable.
     """
     cleaned = (orig_text or "").strip()
+    if tag is None:
+        m_tag = re.match(r"^\[(Bubble|OSB)\]", cleaned, re.IGNORECASE)
+        if m_tag:
+            tag = m_tag.group(1)
+
+    # Strip any leading tag like [Bubble] or [OSB]
+    cleaned = re.sub(r"^\[(?:Bubble|OSB)\]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    # Strip any duplicate leading index if present, e.g. "1: "
+    cleaned = re.sub(r"^\d+\s*:\s*", "", cleaned).strip()
     if not cleaned:
         return True
     if cleaned.upper() in ("[OCR FAILED]", "OCR FAILED", "[OCR_FAILED]"):
         return True
     if PURE_SYMBOL_REGEX.match(cleaned):
         return True
+
+    # Pure digits, timestamps or numeric codes (e.g. '22:32', '12:00', '100%')
+    if re.match(r"^[\d\s:.\-_/%]+$", cleaned):
+        return True
+
     # If the original line is pure Japanese Kana + symbols (no Kanji, no Korean, no Latin)
     if JAPANESE_KANA_SFX_REGEX.match(cleaned):
+        # [Bubble] SFX must be translated; [OSB] SFX is ignorable
+        if tag and tag.lower() == "bubble":
+            return False
         return True
+
     return False
 
 
@@ -149,10 +265,8 @@ def validate_batch_translations_stats(
             current_file = m_header.group(1).strip()
             continue
 
-        m_num = re.match(r"^(\d+)\s*:\s*(.*?)$", line)
-        if m_num and current_file:
-            idx = int(m_num.group(1))
-            content = m_num.group(2).strip()
+        tag, idx, content = parse_line_index_and_content(line)
+        if idx is not None and current_file:
             total_lines += 1
 
             if "||" in content:
@@ -167,12 +281,12 @@ def validate_batch_translations_stats(
                     translated_lines += 1
                 else:
                     # If trans_part is empty, check if original was pure symbols / ocr failed
-                    if is_ignorable_original_line(orig_part):
+                    if is_ignorable_original_line(orig_part, tag=tag):
                         translated_lines += 1  # Intentionally blank per rules
                     else:
                         missing_by_file.setdefault(current_file, []).append(idx)
             else:
-                if is_ignorable_original_line(content):
+                if is_ignorable_original_line(content, tag=tag):
                     translated_lines += 1
                 else:
                     missing_by_file.setdefault(current_file, []).append(idx)
@@ -203,11 +317,8 @@ def find_problematic_lines(batch_manual_txt: str) -> List[Dict[str, Any]]:
             current_file = m_header.group(1).strip()
             continue
 
-        m_num = re.match(r"^(\d+)\s*:\s*(.*?)$", line)
-        if m_num and current_file:
-            idx = int(m_num.group(1))
-            content = m_num.group(2).strip()
-
+        tag, idx, content = parse_line_index_and_content(line)
+        if idx is not None and current_file:
             if "||" in content:
                 parts = content.split("||", 1)
                 orig_part = parts[0].strip()
@@ -219,24 +330,27 @@ def find_problematic_lines(batch_manual_txt: str) -> List[Dict[str, Any]]:
                         problematic.append({
                             "file": current_file,
                             "idx": idx,
+                            "tag": tag,
                             "orig": orig_part,
                             "trans": trans_part,
                             "reason": "asian_bleed",
                         })
                 else:
-                    if not is_ignorable_original_line(orig_part):
+                    if not is_ignorable_original_line(orig_part, tag=tag):
                         problematic.append({
                             "file": current_file,
                             "idx": idx,
+                            "tag": tag,
                             "orig": orig_part,
                             "trans": "",
                             "reason": "missing",
                         })
             else:
-                if not is_ignorable_original_line(content):
+                if not is_ignorable_original_line(content, tag=tag):
                     problematic.append({
                         "file": current_file,
                         "idx": idx,
+                        "tag": tag,
                         "orig": content,
                         "trans": "",
                         "reason": "missing",
@@ -306,7 +420,11 @@ def extract_file_names_from_batch_manual(batch_manual_txt: str) -> List[str]:
     return sorted(files, key=natural_sort_key)
 
 
-def extract_ocr_blocks_for_files(batch_manual_txt: str, target_files: List[str]) -> str:
+def extract_ocr_blocks_for_files(
+    batch_manual_txt: str,
+    target_files: List[str],
+    strip_tags: bool = False,
+) -> str:
     """Extracts raw OCR text lines for specific target files from batch manual text."""
     target_set = set(target_files)
     current_file = None
@@ -339,7 +457,18 @@ def extract_ocr_blocks_for_files(batch_manual_txt: str, target_files: List[str])
             continue
 
         if collecting and current_file:
-            current_block.append(raw_line)
+            if strip_tags:
+                tag, idx, clean_content = parse_line_index_and_content(line)
+                if idx is not None:
+                    if "||" in clean_content:
+                        orig_part = clean_content.split("||", 1)[0].strip()
+                    else:
+                        orig_part = clean_content.strip()
+                    current_block.append(f"{idx}: {orig_part}")
+                else:
+                    current_block.append(raw_line)
+            else:
+                current_block.append(raw_line)
 
     if current_block:
         blocks.append("\n".join(current_block))

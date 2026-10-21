@@ -2945,21 +2945,22 @@ def get_batch_gemini_session() -> GeminiChatSession:
 def handle_batch_chat_model_change(selected_model: str):
     session = get_batch_gemini_session()
     session.set_model(selected_model)
-    return f"**Active Model:** `{selected_model}`"
+    session.push_notification(f"Đã chuyển sang model {selected_model}", level="info")
+    return session.get_status_html()
 
 
 def handle_batch_chat_cancel(current_history: List[Any]):
     session = get_batch_gemini_session()
     next_key = session.cancel_and_rotate_key()
-    key_info = f" Switched to {next_key}." if next_key else ""
-    status_msg = f"Request cancelled on `{session.current_model}`.{key_info} You can send another request."
+    key_info = f" Đã chuyển sang {next_key}." if next_key else ""
+    session.push_notification(f"Yêu cầu đã bị hủy.{key_info}", level="warning")
 
     hist = list(current_history or [])
     if hist and isinstance(hist[-1], (list, tuple)) and len(hist[-1]) > 1:
         last_bot_msg = str(hist[-1][1] or "")
         if "Thinking..." in last_bot_msg or "Analyzing..." in last_bot_msg or "Translating..." in last_bot_msg or "Fixing..." in last_bot_msg or "⏳" in last_bot_msg or not last_bot_msg:
             hist[-1] = (hist[-1][0], "*(Request cancelled)*")
-    return hist, status_msg
+    return hist, session.get_status_html()
 
 
 def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected_model: str):
@@ -2971,7 +2972,8 @@ def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected
         error_msg = "No API Key found in vault or configuration."
         hist = list(current_history or [])
         hist.append(("Load OCR", error_msg))
-        yield hist, "**Error:** Missing API Key"
+        session.push_notification("Thiếu API Key", level="error")
+        yield hist, session.get_status_html()
         return
 
     txt_content = (manual_txt or "").strip()
@@ -2979,7 +2981,8 @@ def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected
         error_msg = "Batch manual box is empty! Please load files or run OCR first."
         hist = list(current_history or [])
         hist.append(("Load OCR", error_msg))
-        yield hist, "**Warning:** Batch box empty"
+        session.push_notification("Khung Batch trống", level="warning")
+        yield hist, session.get_status_html()
         return
 
     session.reset()
@@ -2991,45 +2994,56 @@ def handle_batch_chat_init(manual_txt: str, current_history: List[Any], selected
     )
 
     init_prompt_label = "Load OCR to AI"
-    # Hiển thị ngay lập tức tin nhắn của user và trạng thái đang xử lý
-    yield [(init_prompt_label, "Analyzing context and addressing rules...")], f"Sending request to `{session.current_model}`..."
+    session.push_notification("Đang chuẩn bị gửi OCR tới AI...", level="info")
+    yield [(init_prompt_label, "Analyzing context and addressing rules...")], session.get_status_html()
 
     try:
-        status_info, current_model, model_text = session.send_message(user_prompt)
-        yield [(init_prompt_label, model_text)], f"**Model:** `{current_model}` | {status_info}"
+        for status_info, model_text in session.send_message_stream(user_prompt):
+            if model_text is not None:
+                yield [(init_prompt_label, model_text)], status_info
+            else:
+                yield [(init_prompt_label, "Analyzing context and addressing rules...")], status_info
     except Exception as e:
-        yield [(init_prompt_label, f"Error: {str(e)}")], f"**Error:** {str(e)}"
+        session.push_notification(f"Lỗi: {str(e)[:60]}", level="error")
+        yield [(init_prompt_label, f"Error: {str(e)}")], session.get_status_html()
 
 
 def handle_batch_chat_send(user_msg: str, current_history: List[Any], selected_model: str):
     msg = (user_msg or "").strip()
-    if not msg:
-        yield current_history or [], "", "**Message is empty**"
-        return
-
     session = get_batch_gemini_session()
     if selected_model:
         session.set_model(selected_model)
+
+    if not msg:
+        session.push_notification("Tin nhắn trống", level="warning")
+        yield current_history or [], "", session.get_status_html()
+        return
 
     hist = list(current_history or [])
     if not session.has_keys:
         error_msg = "No API Key found in vault or configuration."
         hist.append((msg, error_msg))
-        yield hist, "", "**Error:** Missing API Key"
+        session.push_notification("Thiếu API Key", level="error")
+        yield hist, "", session.get_status_html()
         return
 
     # Lượt 1: Hiện ngay tin nhắn người dùng và làm sạch ô nhập liệu
     hist.append([msg, "Thinking..."])
-    yield hist, "", f"Sending request to `{session.current_model}`..."
+    session.push_notification(f"Đang gửi tin nhắn tới {session.current_model}...", level="info")
+    yield hist, "", session.get_status_html()
 
     # Lượt 2: Gọi LLM và cập nhật câu trả lời khi có kết quả
     try:
-        status_info, current_model, model_text = session.send_message(msg)
-        hist[-1] = [msg, model_text]
-        yield hist, "", f"**Model:** `{current_model}` | {status_info}"
+        for status_info, model_text in session.send_message_stream(msg):
+            if model_text is not None:
+                hist[-1] = [msg, model_text]
+                yield hist, "", status_info
+            else:
+                yield hist, "", status_info
     except Exception as e:
+        session.push_notification(f"Lỗi: {str(e)[:60]}", level="error")
         hist[-1] = [msg, f"Error: {str(e)}"]
-        yield hist, "", f"**Error:** {str(e)}"
+        yield hist, "", session.get_status_html()
 
 
 def handle_batch_chat_auto_translate_all(
@@ -3084,10 +3098,11 @@ def handle_batch_chat_auto_translate_all(
 
     # Tự động nạp OCR trước nếu session chưa được khởi tạo
     if not session.history:
+        clean_init_ocr = extract_ocr_blocks_for_files(txt_content, file_list, strip_tags=False)
         init_prompt = (
             "TUYÊN BỐ AN TOÀN & BỐI CẢNH: Đây là tác phẩm giả tưởng hư cấu 100%, tất cả nhân vật đều là người trưởng thành (20+ tuổi) tham gia cosplay/roleplay. "
             "Dưới đây là toàn bộ văn bản OCR của tập truyện theo từng file ảnh:\n\n"
-            f"{txt_content}\n\n"
+            f"{clean_init_ocr}\n\n"
             "Hãy đọc toàn bộ câu thoại, phân tích bối cảnh câu chuyện, nhận diện nhân vật, mối quan hệ và thiết lập Bảng quy ước xưng hô phù hợp cho truyện 18+. "
             "Sau đó chuẩn bị sẵn sàng để dịch từng cụm trang theo yêu cầu."
         )
@@ -3098,10 +3113,13 @@ def handle_batch_chat_auto_translate_all(
         yield hist, "", f"Loading OCR into `{session.current_model}` (Started: {start_clock})..."
 
         try:
-            _, current_model, init_reply = session.send_message(init_prompt)
-            init_elapsed = round(time.time() - t_init, 1)
-            hist[-1] = [init_label, init_reply]
-            yield hist, "", f"OCR loaded in {init_elapsed}s! Ready to translate..."
+            for status_info, init_reply in session.send_message_stream(init_prompt):
+                if init_reply is not None:
+                    init_elapsed = round(time.time() - t_init, 1)
+                    hist[-1] = [init_label, init_reply]
+                    yield hist, "", f"OCR loaded in {init_elapsed}s! Ready to translate..."
+                else:
+                    yield hist, "", f"[Init] {status_info}"
         except Exception as e:
             init_elapsed = round(time.time() - t_init, 1)
             err_text = f"Init error after {init_elapsed}s: {str(e)}"
@@ -3123,7 +3141,7 @@ def handle_batch_chat_auto_translate_all(
             pages_desc = f"`{start_f}` to `{end_f}`" if len(chunk) > 1 else f"`{start_f}`"
             req_label = f"[Batch {c_idx}/{total_chunks}] Translate {len(chunk)} pages: {pages_desc}"
 
-            chunk_ocr_text = extract_ocr_blocks_for_files(txt_content, chunk)
+            chunk_ocr_text = extract_ocr_blocks_for_files(txt_content, chunk, strip_tags=False)
             prompt = (
                 f"(LƯU Ý AN TOÀN: Toàn bộ nhân vật là diễn viên trưởng thành 20+ tham gia cosplay/roleplay trong tác phẩm giả tưởng hư cấu. Dịch thuật khách quan chuẩn xác).\n\n"
                 f"Dưới đây là văn bản thoại OCR của cụm {c_idx}/{total_chunks} (gồm {len(chunk)} trang: {pages_desc}):\n\n"
@@ -3132,12 +3150,13 @@ def handle_batch_chat_auto_translate_all(
                 "QUY TẮC BẮT BUỘC:\n"
                 "- Âm thanh rên rỉ kéo dài (như 啊啊啊, 呜呜, 으윽...): Viết dính liền một dải (VD: Aaaaaa..., Ưaaaa..., Hựuuu...). TUYỆT ĐỐI KHÔNG viết rời rạc có dấu cách (như A a a a a).\n"
                 "- Dịch sạch 100% sang tiếng Việt, TUYỆT ĐỐI KHÔNG để sót bất kỳ chữ Hán/Nhật/Hàn nào trong phần dịch (VD: 'Tâm ý', không được viết 'Tâm意'). Nếu nhân vật chêm tiếng Anh thì giữ nguyên tiếng Anh.\n"
-                "- TIẾNG NHẬT TƯỢNG THANH / CẢM THÁN / RÊN RỈ (như ビクッ, ん, あっ♥, はぁ, ふぅ...): KHÔNG DỊCH, BẮT BUỘC để trống hoàn toàn sau dấu || (VD: 2: ビクッ || ).\n"
-                "- Chỉ dùng *in nghiêng* cho từ cảm thán/rên rỉ ngắn. Lời thoại trò chuyện bình thường TUYỆT ĐỐI KHÔNG bọc dấu *. Câu hét lớn có !! dùng **in đậm**.\n"
+                "- GIỮ NGUYÊN hậu tố danh xưng tiếng Nhật (-san, -kun, -chan, -sama, -senpai, -dono...), danh xưng \"Sensei\" và tên riêng nhân vật, không tự ý dịch sang tiếng Việt.\n"
+                "- ĐỐI VỚI DÒNG [Bubble]: Tất cả lời thoại, từ tượng thanh, tiếng thở dâm, rên rỉ (kể cả tiếng Nhật như ビクッ, ん, あっ...) PHẢI ĐƯỢC DỊCH BÌNH THƯỜNG sang tiếng Việt giàu cảm xúc 18+, KHÔNG ĐƯỢC để trống.\n"
+                "- ĐỐI VỚI DÒNG [OSB]: Từ tượng thanh / cảm thán / rên rỉ tiếng Nhật ngoài nền tranh thì BỎ QUA, để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
+                "- ĐỊNH DẠNG FONT CHỮ: Dùng *in nghiêng* cho từ tượng thanh, tiếng thở dâm, rên rỉ (*Chụt♡*, *Ưm...*); **in đậm** cho câu thét lớn quát tháo có dấu !! hoặc !?; ***vừa đậm vừa nghiêng*** cho tiếng hét lúc lên đỉnh cực khoái. Lời thoại trò chuyện bình thường KHÔNG bọc dấu * lung tung.\n"
                 "Định dạng trả về bắt buộc:\n"
                 "[tên_file]:\n"
-                "1: [tiếng gốc] || [bản dịch]\n"
-                "2: [tiếng gốc] || [bản dịch]\n\n"
+                "[thẻ] [số_thứ_tự]: [tiếng gốc] || [bản dịch]\n\n"
                 "Chỉ trả về các dòng dịch theo đúng cấu trúc trên cho tất cả các trang trong cụm này, không thêm lời giải thích thừa."
             )
 
@@ -3147,10 +3166,13 @@ def handle_batch_chat_auto_translate_all(
             yield hist, "", f"Translating batch {c_idx}/{total_chunks} ({pages_desc}) on `{session.current_model}` (Started: {clock_chunk})..."
 
             try:
-                status_info, current_model, model_text = session.send_message(prompt)
-                chunk_elapsed = round(time.time() - t_chunk, 1)
-                hist[-1] = [req_label, model_text]
-                yield hist, "", f"Finished batch {c_idx}/{total_chunks} ({pages_desc}) in {chunk_elapsed}s. Model: `{current_model}` | {status_info}"
+                for status_info, model_text in session.send_message_stream(prompt):
+                    if model_text is not None:
+                        chunk_elapsed = round(time.time() - t_chunk, 1)
+                        hist[-1] = [req_label, model_text]
+                        yield hist, "", f"Finished batch {c_idx}/{total_chunks} ({pages_desc}) in {chunk_elapsed}s. {status_info}"
+                    else:
+                        yield hist, "", f"[{c_idx}/{total_chunks}] {status_info}"
             except Exception as e:
                 chunk_elapsed = round(time.time() - t_chunk, 1)
                 err_msg = f"Error at batch {c_idx}/{total_chunks} ({pages_desc}) after {chunk_elapsed}s: {str(e)}"
@@ -3167,9 +3189,12 @@ def handle_batch_chat_auto_translate_all(
     problems = find_problematic_lines(current_merged_txt)
 
     if problems:
+        auto_fix_items = problems[:25]
         problem_count = len(problems)
-        auto_fix_items = problems[:20]  # Giới hạn tối đa 20 câu lỗi mỗi đợt để phản hồi tức thì
-        lines_to_fix = [f"{item['file']}: {item['idx']}: {item['orig']}" for item in auto_fix_items]
+        lines_to_fix = []
+        for item in auto_fix_items:
+            tag_prefix = f"[{item['tag']}] " if item.get("tag") else ""
+            lines_to_fix.append(f"{item['file']}: {tag_prefix}{item['idx']}: {item['orig']}")
 
         fix_req_label = f"[Auto-Fix] Found {problem_count} untranslated or Han/Hangul lines"
         fix_prompt = (
@@ -3177,12 +3202,14 @@ def handle_batch_chat_auto_translate_all(
             + "\n".join(lines_to_fix) + "\n\n"
             "Hãy dịch lại hoàn toàn sạch sẽ sang tiếng Việt cho các câu trên.\n"
             "QUY TẮC QUAN TRỌNG:\n"
-            "- BẮT BUỘC dịch sạch 100% chữ Hán/Nhật/Hàn, không để sót chữ nào, tuân thủ đúng bảng xưng hô, tiếng rên kéo dài viết dính liền.\n"
-            "- TUYỆT ĐỐI BỎ QUA từ tượng thanh / cảm thán / rên rỉ tiếng Nhật (như ビクッ, ん, あっ, はぁ...), để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
-            "- Quy tắc font: chỉ dùng *in nghiêng* cho tiếng rên ngắn, không bọc * cả câu dài. Nếu có tiếng Anh thì giữ nguyên tiếng Anh.\n\n"
+            "- BẮT BUỘC dịch sạch 100% chữ Hán/Nhật/Hàn, tuân thủ đúng bảng xưng hô, tiếng rên kéo dài viết dính liền.\n"
+            "- GIỮ NGUYÊN hậu tố danh xưng tiếng Nhật (-san, -kun, -chan, -sama, -senpai, -dono...), danh xưng \"Sensei\" và tên riêng nhân vật, không tự ý dịch sang tiếng Việt.\n"
+            "- ĐỐI VỚI DÒNG [Bubble]: Tất cả lời thoại, từ tượng thanh, tiếng thở dâm, rên rỉ (kể cả tiếng Nhật như ビクッ, ん, あっ...) PHẢI ĐƯỢC DỊCH BÌNH THƯỜNG sang tiếng Việt giàu cảm xúc 18+, KHÔNG ĐƯỢC để trống.\n"
+            "- ĐỐI VỚI DÒNG [OSB]: Từ tượng thanh / cảm thán / rên rỉ tiếng Nhật ngoài nền tranh thì BỎ QUA, để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
+            "- ĐỊNH DẠNG FONT CHỮ: Dùng *in nghiêng* cho từ tượng thanh, tiếng thở dâm, rên rỉ (*Chụt♡*, *Ưm...*); **in đậm** cho câu thét lớn quát tháo có dấu !! hoặc !?; ***vừa đậm vừa nghiêng*** cho tiếng hét lúc lên đỉnh cực khoái. Lời thoại trò chuyện bình thường KHÔNG bọc dấu * lung tung.\n\n"
             "Định dạng trả về bắt buộc:\n"
             "[tên_file]:\n"
-            "[số_dòng]: [tiếng gốc] || [bản dịch]\n\n"
+            "[thẻ] [số_thứ_tự]: [tiếng gốc] || [bản dịch]\n\n"
             "Chỉ trả về các dòng sửa trên, không thêm lời giải thích thừa."
         )
 
@@ -3192,21 +3219,49 @@ def handle_batch_chat_auto_translate_all(
         yield hist, "", f"Fixing {len(auto_fix_items)} lines on `{session.current_model}` (Started: {clock_fix})..."
 
         try:
-            status_info, current_model, fix_model_text = session.send_message(fix_prompt)
-            fix_elapsed = round(time.time() - t_fix, 1)
-            hist[-1] = [fix_req_label, fix_model_text]
-            yield hist, "", f"Fixed {len(auto_fix_items)} lines in {fix_elapsed}s. Model: `{current_model}` | {status_info}"
+            for status_info, fix_model_text in session.send_message_stream(fix_prompt):
+                if fix_model_text is not None:
+                    fix_elapsed = round(time.time() - t_fix, 1)
+                    hist[-1] = [fix_req_label, fix_model_text]
+                    yield hist, "", f"Fixed {len(auto_fix_items)} lines in {fix_elapsed}s. {status_info}"
+                else:
+                    yield hist, "", f"[Auto-Fix] {status_info}"
         except Exception as e:
             fix_elapsed = round(time.time() - t_fix, 1)
             hist[-1] = [fix_req_label, f"Error fixing lines after {fix_elapsed}s: {str(e)}"]
+    else:
+        # Khi không có dòng lỗi cú pháp, vẫn gửi 1 lượt gọi API cuối cùng để AI rà soát và xác nhận chất lượng
+        review_req_label = "[Review] Final translation verification"
+        review_prompt = (
+            "Toàn bộ các trang đã được dịch đầy đủ. Hãy rà soát lướt qua một lượt cuối cùng và đưa ra nhận xét ngắn gọn:\n"
+            "1. Các câu thoại đã mượt mà, tự nhiên và chuẩn theo đúng bảng xưng hô 18+ đã quy ước chưa?\n"
+            "2. Các từ tượng thanh trong [Bubble] đã được dịch đầy đủ chưa (không bị bỏ sót), và các từ tượng thanh tiếng Nhật ngoài nền [OSB] đã được để trống đúng quy định chưa?\n"
+            "3. Các hậu tố danh xưng (-san, -kun, -chan, -senpai...), danh xưng \"Sensei\" và tên riêng nhân vật đã được giữ nguyên chưa?"
+        )
+        t_rev = time.time()
+        clock_rev = time.strftime("%H:%M:%S")
+        hist.append([review_req_label, f"Verifying translation quality with AI... [Started at {clock_rev}]"])
+        yield hist, "", f"Verifying translation on `{session.current_model}` (Started: {clock_rev})..."
+
+        try:
+            for status_info, rev_model_text in session.send_message_stream(review_prompt):
+                if rev_model_text is not None:
+                    rev_elapsed = round(time.time() - t_rev, 1)
+                    hist[-1] = [review_req_label, rev_model_text]
+                    yield hist, "", f"Verified in {rev_elapsed}s. {status_info}"
+                else:
+                    yield hist, "", f"[Review] {status_info}"
+        except Exception as e:
+            rev_elapsed = round(time.time() - t_rev, 1)
+            hist[-1] = [review_req_label, f"Verification notice: {str(e)}"]
 
     yield hist, "", f"Finished translating all {len(file_list)} pages! Click 'Apply to Translation Box' to apply."
 
 
 def handle_batch_chat_quick_check_role(current_history: List[Any], selected_model: str):
     prompt = (
-        "Hãy kiểm tra và tóm tắt lại bảng quy ước xưng hô của các nhân vật đã xuất hiện trong truyện (Ai xưng gì với ai). "
-        "Đánh giá xem các đoạn thoại vừa dịch có câu nào bị xưng hô nhầm ngôi hoặc không tự nhiên không?"
+        "Hãy kiểm tra và tóm tắt lại bảng quy ước xưng hô của các nhân vật đã xuất hiện trong truyện (Ai xưng gì với ai).\n"
+        "Đặc biệt rà soát: Có câu nào bị xưng hô nhầm ngôi, câu nào tự ý dịch các hậu tố danh xưng (-san, -kun, -chan, -senpai...) hay từ 'Sensei' sang tiếng Việt không?"
     )
     yield from handle_batch_chat_send(prompt, current_history, selected_model)
 
@@ -3228,12 +3283,11 @@ def handle_batch_chat_apply(current_history: List[Any], current_manual_txt: str)
 
 
 def handle_batch_chat_reset(selected_model: str):
-    global BATCH_GEMINI_SESSION
-    if BATCH_GEMINI_SESSION:
-        BATCH_GEMINI_SESSION.reset()
-        if selected_model:
-            BATCH_GEMINI_SESSION.set_model(selected_model)
-    model = selected_model or "gemini-3.8-flash"
-    return [], f"**Active Model:** `{model}` (Session reset)"
+    session = get_batch_gemini_session()
+    session.reset()
+    if selected_model:
+        session.set_model(selected_model)
+    session.push_notification("Session reset thành công", level="info")
+    return [], session.get_status_html()
 
 
