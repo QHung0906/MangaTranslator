@@ -302,15 +302,14 @@ function() {
     if (footer && !footer.parentNode.querySelector('.mangatl-credits')) {
         const newContent = document.createElement('div');
         newContent.className = 'mangatl-credits';
-        newContent.innerHTML = 'made by <a href="https://github.com/meangrinch">grinnch</a> with ❤️';
+        newContent.innerHTML = 'original by <a href="https://github.com/meangrinch" target="_blank">grinnch</a> · modified by <a href="https://github.com/QHung0906" target="_blank">QHung0906</a> with ❤️';
         newContent.style.textAlign = 'center';
         newContent.style.paddingTop = '50px';
         newContent.style.color = 'lightgray';
-        const link = newContent.querySelector('a');
-        if (link) {
+        newContent.querySelectorAll('a').forEach(link => {
             link.style.color = 'gray';
             link.style.textDecoration = 'underline';
-        }
+        });
         footer.parentNode.insertBefore(newContent, footer);
     }
 
@@ -649,31 +648,42 @@ def create_layout(
                                     interactive=True,
                                 )
                                 with gr.Column(scale=3):
-                                    batch_chat_status = gr.Markdown(
-                                        "**Active Model:** `gemini-3.8-flash`"
+                                    batch_chat_status = gr.HTML(
+                                        value='<div class="toast-stack-container"><div class="toast-model-header"><strong>Model:</strong> <span class="toast-model-code">gemini-3.8-flash</span></div></div>',
+                                        elem_id="batch_chat_status",
                                     )
                             batch_chat_history = gr.Chatbot(
                                 label="Gemini Chat",
                                 height=380,
                                 elem_id="batch_chat_history",
                             )
-                            with gr.Row():
+                            with gr.Row(elem_id="batch_chat_input_row"):
                                 batch_chat_input = gr.Textbox(
-                                    label="Message",
+                                    show_label=False,
                                     placeholder="Type a message or instruction...",
                                     scale=4,
                                     lines=1,
                                     elem_id="batch_chat_input",
                                 )
-                                batch_chat_send_btn = gr.Button("Send", variant="primary", scale=1)
-                                batch_chat_cancel_btn = gr.Button("Stop", variant="stop", scale=1)
-                            with gr.Row():
-                                batch_chat_auto_all_btn = gr.Button("Auto Translate All", variant="primary")
-                                batch_chat_quick_check_role_btn = gr.Button("Check Addressing", variant="secondary")
-                            with gr.Row():
-                                batch_chat_init_btn = gr.Button("Load OCR to AI", variant="secondary")
-                                batch_chat_apply_btn = gr.Button("Apply to Translation Box", variant="primary")
-                                batch_chat_reset_btn = gr.Button("Reset Session", variant="secondary")
+                                batch_chat_send_btn = gr.Button("Send", variant="primary", scale=1, elem_id="batch_chat_send_btn")
+                                batch_chat_cancel_btn = gr.Button("Stop", variant="stop", scale=1, elem_id="batch_chat_cancel_btn")
+                            with gr.Row(elem_id="batch_chat_auto_row"):
+                                batch_chat_init_btn = gr.Button("Load OCR to AI", variant="secondary", scale=2, elem_id="batch_chat_init_btn")
+                                batch_chat_auto_all_btn = gr.Button("Auto Translate All", variant="primary", scale=2, elem_id="batch_chat_auto_all_btn")
+                                batch_chat_chunk_size = gr.Number(
+                                    value=10,
+                                    minimum=1,
+                                    maximum=50,
+                                    step=1,
+                                    label="Pages / Batch",
+                                    scale=1,
+                                    elem_id="batch_chat_chunk_size",
+                                )
+                            with gr.Row(elem_id="batch_chat_actions_row"):
+                                batch_chat_quick_check_role_btn = gr.Button("Check Addressing", variant="secondary", scale=2, elem_id="batch_chat_quick_check_role_btn")
+                                batch_chat_check_and_fix_btn = gr.Button("Check & Fix", variant="primary", scale=2, elem_id="batch_chat_check_and_fix_btn")
+                                batch_chat_apply_btn = gr.Button("Apply to Translation Box", variant="primary", scale=2, elem_id="batch_chat_apply_btn")
+                                batch_chat_reset_btn = gr.Button("Reset Session", variant="secondary", scale=1, elem_id="batch_chat_reset_btn")
                         batch_special_instructions = gr.Textbox(
                             label="Special Instructions",
                             placeholder="Give the LLM optional context, formatting instructions, etc.",
@@ -4323,12 +4333,22 @@ def create_layout(
         )
         batch_chat_auto_all_event = batch_chat_auto_all_btn.click(
             fn=callbacks.handle_batch_chat_auto_translate_all,
-            inputs=[batch_manual_txt_editor, batch_chat_history, batch_chat_model_selector],
+            inputs=[
+                batch_manual_txt_editor,
+                batch_chat_history,
+                batch_chat_model_selector,
+                batch_chat_chunk_size,
+            ],
             outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
         )
         batch_chat_quick_check_role_event = batch_chat_quick_check_role_btn.click(
             fn=callbacks.handle_batch_chat_quick_check_role,
             inputs=[batch_chat_history, batch_chat_model_selector],
+            outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
+        )
+        batch_chat_check_and_fix_event = batch_chat_check_and_fix_btn.click(
+            fn=callbacks.handle_batch_chat_check_and_fix,
+            inputs=[batch_chat_history, batch_chat_model_selector, batch_manual_txt_editor],
             outputs=[batch_chat_history, batch_chat_input, batch_chat_status],
         )
         batch_chat_cancel_btn.click(
@@ -4341,6 +4361,7 @@ def create_layout(
                 batch_chat_submit_event,
                 batch_chat_auto_all_event,
                 batch_chat_quick_check_role_event,
+                batch_chat_check_and_fix_event,
             ],
         )
         batch_chat_apply_btn.click(
@@ -4352,6 +4373,15 @@ def create_layout(
             fn=callbacks.handle_batch_chat_reset,
             inputs=[batch_chat_model_selector],
             outputs=[batch_chat_history, batch_chat_status],
+            cancels=[
+                batch_chat_init_event,
+                batch_chat_send_event,
+                batch_chat_submit_event,
+                batch_chat_auto_all_event,
+                batch_chat_quick_check_role_event,
+                batch_chat_check_and_fix_event,
+            ],
+            queue=False,
         )
 
         app.load(

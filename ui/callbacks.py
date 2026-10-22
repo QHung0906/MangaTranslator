@@ -957,11 +957,8 @@ def handle_translate_click(
                 backend_config.translation.manual_translation_text = manual_txt_val.strip()
                 # Write updated box content to backup folder
                 try:
-                    backup_dir = Path(r"C:\Users\Hung\Documents\Selenium\MangaTranslator\Translation_backup")
-                    backup_dir.mkdir(parents=True, exist_ok=True)
-                    backup_path = backup_dir / f"{_base_name}_translation.txt"
-                    with open(backup_path, "w", encoding="utf-8") as f:
-                        f.write(manual_txt_val.strip())
+                    from core.services.translation_backup_manager import get_backup_manager
+                    get_backup_manager().save_single_rendered(input_image_path, manual_txt_val)
                 except Exception:
                     pass
         else:
@@ -1014,8 +1011,11 @@ def handle_translate_click(
             if m:
                 _txt_content_str = m.group(1).strip()
                 txt_content = gr.update(value=_txt_content_str)
-                # Lần 1: Không lưu vào Translation_backup, chỉ nạp vào Textbox để sửa
-                # Simplify status message to be clean and user friendly
+                try:
+                    from core.services.translation_backup_manager import get_backup_manager
+                    get_backup_manager().save_single_raw(input_image_path, _txt_content_str)
+                except Exception:
+                    pass
                 cleaned = "Template generated. Edit text after '||' then click Translate again to render."
                 
         return None, _status_update(cleaned), txt_content
@@ -1149,12 +1149,8 @@ def handle_batch_click(
 
             if parsed_batch_translations:
                 try:
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    backup_dir = Path(r"C:\Users\Hung\Documents\Selenium\MangaTranslator\Translation_backup")
-                    backup_dir.mkdir(parents=True, exist_ok=True)
-                    backup_path = backup_dir / f"batch_translation_{timestamp}.txt"
-                    with open(backup_path, "w", encoding="utf-8") as f:
-                        f.write(batch_manual_txt_val.strip())
+                    from core.services.translation_backup_manager import get_backup_manager
+                    get_backup_manager().save_batch_rendered(batch_manual_txt_val, input_to_process)
                 except Exception:
                     pass
 
@@ -1280,7 +1276,11 @@ def handle_batch_click(
             if collected_blocks:
                 full_batch_txt = "\n\n".join(collected_blocks)
                 batch_txt_update = gr.update(value=full_batch_txt)
-                # Lần 1: Không lưu vào Translation_backup, chỉ nạp vào Textbox để người dùng xem và chỉnh sửa
+                try:
+                    from core.services.translation_backup_manager import get_backup_manager
+                    get_backup_manager().save_batch_raw(full_batch_txt, input_to_process)
+                except Exception:
+                    pass
 
         # Re-get font path for success message (logic already validated it)
         font_dir_path = (
@@ -2872,6 +2872,8 @@ from core.services.batch_translation_parser import (
     extract_ocr_blocks_for_files,
     find_problematic_lines,
     validate_batch_translations_stats,
+    sanitize_chunk_size,
+    chunk_files_list,
 )
 import os
 
@@ -3047,7 +3049,10 @@ def handle_batch_chat_send(user_msg: str, current_history: List[Any], selected_m
 
 
 def handle_batch_chat_auto_translate_all(
-    manual_txt: str, current_history: List[Any], selected_model: str
+    manual_txt: str,
+    current_history: List[Any],
+    selected_model: str,
+    chunk_size: Any = 10,
 ):
     session = get_batch_gemini_session()
     if selected_model:
@@ -3092,8 +3097,8 @@ def handle_batch_chat_auto_translate_all(
     files_to_translate = [f for f in file_list if f not in chat_done_files]
     already_done_count = len(file_list) - len(files_to_translate)
 
-    chunk_size = 10
-    chunks = [files_to_translate[i : i + chunk_size] for i in range(0, len(files_to_translate), chunk_size)]
+    c_size = sanitize_chunk_size(chunk_size, default=10, min_val=1, max_val=50)
+    chunks = chunk_files_list(files_to_translate, c_size)
     total_chunks = len(chunks)
 
     # Tự động nạp OCR trước nếu session chưa được khởi tạo
@@ -3191,27 +3196,8 @@ def handle_batch_chat_auto_translate_all(
     if problems:
         auto_fix_items = problems[:25]
         problem_count = len(problems)
-        lines_to_fix = []
-        for item in auto_fix_items:
-            tag_prefix = f"[{item['tag']}] " if item.get("tag") else ""
-            lines_to_fix.append(f"{item['file']}: {tag_prefix}{item['idx']}: {item['orig']}")
-
         fix_req_label = f"[Auto-Fix] Found {problem_count} untranslated or Han/Hangul lines"
-        fix_prompt = (
-            "Dưới đây là các câu thoại bị sót chữ Hán/Hàn hoặc chưa được dịch hoàn chỉnh:\n\n"
-            + "\n".join(lines_to_fix) + "\n\n"
-            "Hãy dịch lại hoàn toàn sạch sẽ sang tiếng Việt cho các câu trên.\n"
-            "QUY TẮC QUAN TRỌNG:\n"
-            "- BẮT BUỘC dịch sạch 100% chữ Hán/Nhật/Hàn, tuân thủ đúng bảng xưng hô, tiếng rên kéo dài viết dính liền.\n"
-            "- GIỮ NGUYÊN hậu tố danh xưng tiếng Nhật (-san, -kun, -chan, -sama, -senpai, -dono...), danh xưng \"Sensei\" và tên riêng nhân vật, không tự ý dịch sang tiếng Việt.\n"
-            "- ĐỐI VỚI DÒNG [Bubble]: Tất cả lời thoại, từ tượng thanh, tiếng thở dâm, rên rỉ (kể cả tiếng Nhật như ビクッ, ん, あっ...) PHẢI ĐƯỢC DỊCH BÌNH THƯỜNG sang tiếng Việt giàu cảm xúc 18+, KHÔNG ĐƯỢC để trống.\n"
-            "- ĐỐI VỚI DÒNG [OSB]: Từ tượng thanh / cảm thán / rên rỉ tiếng Nhật ngoài nền tranh thì BỎ QUA, để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
-            "- ĐỊNH DẠNG FONT CHỮ: Dùng *in nghiêng* cho từ tượng thanh, tiếng thở dâm, rên rỉ (*Chụt♡*, *Ưm...*); **in đậm** cho câu thét lớn quát tháo có dấu !! hoặc !?; ***vừa đậm vừa nghiêng*** cho tiếng hét lúc lên đỉnh cực khoái. Lời thoại trò chuyện bình thường KHÔNG bọc dấu * lung tung.\n\n"
-            "Định dạng trả về bắt buộc:\n"
-            "[tên_file]:\n"
-            "[thẻ] [số_thứ_tự]: [tiếng gốc] || [bản dịch]\n\n"
-            "Chỉ trả về các dòng sửa trên, không thêm lời giải thích thừa."
-        )
+        fix_prompt = build_check_and_fix_prompt(auto_fix_items)
 
         t_fix = time.time()
         clock_fix = time.strftime("%H:%M:%S")
@@ -3258,6 +3244,87 @@ def handle_batch_chat_auto_translate_all(
     yield hist, "", f"Finished translating all {len(file_list)} pages! Click 'Apply to Translation Box' to apply."
 
 
+def build_check_and_fix_prompt(problems: List[Dict[str, Any]]) -> str:
+    lines_to_fix = []
+    for item in problems:
+        tag_prefix = f"[{item['tag']}] " if item.get("tag") else ""
+        lines_to_fix.append(f"{item['file']}: {tag_prefix}{item['idx']}: {item['orig']}")
+
+    return (
+        "Dưới đây là các câu thoại bị sót chữ Hán/Hàn hoặc chưa được dịch hoàn chỉnh:\n\n"
+        + "\n".join(lines_to_fix) + "\n\n"
+        "Hãy dịch lại hoàn toàn sạch sẽ sang tiếng Việt cho các câu trên.\n"
+        "QUY TẮC QUAN TRỌNG:\n"
+        "- BẮT BUỘC dịch sạch 100% chữ Hán/Nhật/Hàn, tuân thủ đúng bảng xưng hô, tiếng rên kéo dài viết dính liền.\n"
+        "- GIỮ NGUYÊN hậu tố danh xưng tiếng Nhật (-san, -kun, -chan, -sama, -senpai, -dono...), danh xưng \"Sensei\" và tên riêng nhân vật, không tự ý dịch sang tiếng Việt.\n"
+        "- ĐỐI VỚI DÒNG [Bubble]: Tất cả lời thoại, từ tượng thanh, tiếng thở dâm, rên rỉ (kể cả tiếng Nhật như ビクッ, ん, あっ...) PHẢI ĐƯỢC DỊCH BÌNH THƯỜNG sang tiếng Việt giàu cảm xúc 18+, KHÔNG ĐƯỢC để trống.\n"
+        "- ĐỐI VỚI DÒNG [OSB]: Từ tượng thanh / cảm thán / rên rỉ tiếng Nhật ngoài nền tranh thì BỎ QUA, để trống sau dấu ||, KHÔNG dịch các từ này thành tiếng Việt.\n"
+        "- ĐỊNH DẠNG FONT CHỮ: Dùng *in nghiêng* cho từ tượng thanh, tiếng thở dâm, rên rỉ (*Chụt♡*, *Ưm...*); **in đậm** cho câu thét lớn quát tháo có dấu !! hoặc !?; ***vừa đậm vừa nghiêng*** cho tiếng hét lúc lên đỉnh cực khoái. Lời thoại trò chuyện bình thường KHÔNG bọc dấu * lung tung.\n\n"
+        "Định dạng trả về bắt buộc:\n"
+        "[tên_file]:\n"
+        "[thẻ] [số_thứ_tự]: [tiếng gốc] || [bản dịch]\n\n"
+        "Chỉ trả về các dòng sửa trên, không thêm lời giải thích thừa."
+    )
+
+
+def handle_batch_chat_check_and_fix(
+    current_history: List[Any],
+    selected_model: str,
+    current_manual_txt: str,
+):
+    hist = list(current_history or [])
+    session = get_batch_gemini_session()
+    if selected_model and selected_model != session.current_model:
+        session.set_model(selected_model)
+
+    combined_texts = []
+    for turn in hist:
+        if isinstance(turn, (list, tuple)) and len(turn) > 1 and turn[1]:
+            combined_texts.append(str(turn[1]))
+
+    current_merged_txt = ""
+    if combined_texts and current_manual_txt:
+        current_merged_txt = parse_chat_response_to_batch_manual("\n\n".join(combined_texts), current_manual_txt)
+    elif current_manual_txt:
+        current_merged_txt = current_manual_txt
+    elif combined_texts:
+        current_merged_txt = "\n\n".join(combined_texts)
+
+    if not current_merged_txt.strip():
+        session.push_notification("Không có nội dung dịch nào để kiểm tra. Hãy chạy dịch trước.", level="warning")
+        yield hist, "", "Không có nội dung dịch nào để kiểm tra. Hãy chạy dịch trước."
+        return
+
+    problems = find_problematic_lines(current_merged_txt)
+    if not problems:
+        session.push_notification("Đã quét xong: Toàn bộ bản dịch sạch sẽ, không sót chữ Hán/Nhật/Hàn nào!", level="info")
+        yield hist, "", "Đã kiểm tra: Không phát hiện câu nào sót chữ Hán/Nhật/Hàn hoặc chưa dịch."
+        return
+
+    auto_fix_items = problems[:25]
+    problem_count = len(problems)
+    fix_req_label = f"[Check & Fix] Found {problem_count} lines to fix"
+    fix_prompt = build_check_and_fix_prompt(auto_fix_items)
+
+    t_fix = time.time()
+    clock_fix = time.strftime("%H:%M:%S")
+    hist.append([fix_req_label, f"Sending manual AI fix request for {len(auto_fix_items)} lines... [Started at {clock_fix}]"])
+    yield hist, "", f"Fixing {len(auto_fix_items)}/{problem_count} lines on `{session.current_model}` (Started: {clock_fix})..."
+
+    try:
+        for status_info, fix_model_text in session.send_message_stream(fix_prompt):
+            if fix_model_text is not None:
+                fix_elapsed = round(time.time() - t_fix, 1)
+                hist[-1] = [fix_req_label, fix_model_text]
+                yield hist, "", f"Fixed {len(auto_fix_items)} lines in {fix_elapsed}s. {status_info}"
+            else:
+                yield hist, "", f"[Check & Fix] {status_info}"
+    except Exception as e:
+        fix_elapsed = round(time.time() - t_fix, 1)
+        hist[-1] = [fix_req_label, f"Error fixing lines after {fix_elapsed}s: {str(e)}"]
+        yield hist, "", f"**Error: {str(e)}**"
+
+
 def handle_batch_chat_quick_check_role(current_history: List[Any], selected_model: str):
     prompt = (
         "Hãy kiểm tra và tóm tắt lại bảng quy ước xưng hô của các nhân vật đã xuất hiện trong truyện (Ai xưng gì với ai).\n"
@@ -3285,6 +3352,11 @@ def handle_batch_chat_apply(current_history: List[Any], current_manual_txt: str)
 def handle_batch_chat_reset(selected_model: str):
     session = get_batch_gemini_session()
     session.reset()
+    try:
+        from core.services.translation_backup_manager import get_backup_manager
+        get_backup_manager().reset_batch_session()
+    except Exception:
+        pass
     if selected_model:
         session.set_model(selected_model)
     session.push_notification("Session reset thành công", level="info")
