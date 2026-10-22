@@ -982,28 +982,30 @@ def translate_and_render(
                     with open(_meta_path, encoding="utf-8") as _mf:
                         _meta_data = json.load(_mf)
                     _meta_map = {int(_e["index"]): _e for _e in _meta_data}
-                    
+                    from core.services.batch_translation_parser import parse_line_index_and_content
+
                     _current_idx = None
                     for _line in _manual_in_memory.splitlines():
                         _line = _line.strip()
                         if not _line:
                             continue
-                        _m = re.match(r"^(?:\[(?:Bubble|OSB)\]\s*)?(\d+):\s*(?:\[(?:Bubble|OSB)\]\s*)?(.*?)(?:\s*\|\|\s*(.*))?$", _line)
-                        if _m:
-                            _idx = int(_m.group(1))
+                        _tag, _idx, _clean = parse_line_index_and_content(_line)
+                        if _idx is not None:
                             _current_idx = _idx
-                            _content = _m.group(2).strip()
-                            _trans = (_m.group(3) or "").strip()
-                            
-                            if "||" not in _line:
+                            if "||" in _clean:
+                                _parts = _clean.split("||", 1)
+                                _content = _parts[0].strip()
+                                _trans = _parts[1].strip()
+                            else:
+                                _content = _clean.strip()
                                 _original_meta = _meta_map.get(_idx, {}).get("original", "").strip()
                                 if _content == _original_meta:
                                     _trans = ""
                                 else:
                                     _trans = _content
-                            
+
                             _manual_txt_map[_idx] = _trans
-                            
+
                             _is_skip_text = (
                                 not _trans
                                 or _trans.strip() in (
@@ -1020,7 +1022,6 @@ def translate_and_render(
                                 if _bbox and len(_bbox) == 4:
                                     _skipped_bboxes.add(tuple(_bbox))
                         elif _current_idx is not None:
-                            # Continuation line for the previous index
                             if "||" in _line:
                                 _extra = _line.split("||", 1)[1].strip()
                             else:
@@ -1030,12 +1031,12 @@ def translate_and_render(
                                     _manual_txt_map[_current_idx] += "\n" + _extra
                                 else:
                                     _manual_txt_map[_current_idx] = _extra
-                    
+
                     log_message(f"[Manual TXT] Đã tải {len(_manual_txt_map)} bản dịch từ bộ nhớ. Bỏ qua redraw cho {len(_skipped_bboxes)} bong bóng.", always_print=True)
                     _manual_txt_done = True
                 except Exception as _je:
                     raise TranslationError(f"[Manual TXT] Lỗi xử lý bản dịch từ bộ nhớ: {_je}")
-                    
+
         def _is_skipped(b):
             _b_bbox = [int(round(v)) for v in b.get("bbox", [])]
             return len(_b_bbox) == 4 and tuple(_b_bbox) in _skipped_bboxes
@@ -1389,8 +1390,11 @@ def translate_and_render(
                         cleaned_cv = fallback_cv
                     return page_image, osb_data, cleaned_cv, clean_info
 
+                # Shared mutable list: OCR texts are appended here by call_translation_api_batch
+                # even if the translation step later raises an exception (e.g. PROHIBITED_CONTENT).
+                _shared_ocr_texts: List[str] = []
+
                 def _run_llm_translation() -> Tuple[List[str], List[str]]:
-                    ocr_texts: List[str] = []
                     if previous_context_texts_provider is not None:
                         resolved_previous_texts = (
                             previous_context_texts_provider() or []
@@ -1436,20 +1440,16 @@ def translate_and_render(
                         bubble_metadata=sorted_bubble_data,
                         previous_context_images=previous_context_images,
                         previous_context_texts=resolved_previous_texts,
-                        ocr_texts_output=ocr_texts,
+                        ocr_texts_output=_shared_ocr_texts,
                         debug=verbose,
                     )
-                    return texts, ocr_texts
+                    return texts, _shared_ocr_texts
 
                 # ── Manual TXT Translation Logic ──────────────────────────────
                 if config.translation.manual_json_translation:
                     if _manual_txt_done:
-                        translated_texts = [
-                            _manual_txt_map.get(i + 1, "")
-                            for i in range(len(sorted_bubble_data))
-                        ]
-                        
                         _meta_path = Path(tempfile.gettempdir()) / f"manga_tr_meta_{hashlib.md5(Path(image_path).name.encode('utf-8')).hexdigest()}.json"
+                        _meta_data = []
                         try:
                             with open(_meta_path, encoding="utf-8") as _mf:
                                 _meta_data = json.load(_mf)
@@ -1461,6 +1461,11 @@ def translate_and_render(
                                 ocr_texts_out.extend(current_ocr_texts)
                         except Exception as e:
                             log_message(f"[Manual TXT] Failed to load metadata for OCR texts: {e}")
+
+                        translated_texts = [
+                            _manual_txt_map.get(i + 1, "")
+                            for i in range(len(sorted_bubble_data))
+                        ]
 
                         if not translated_texts or not any(t.strip() for t in translated_texts):
                             raise TranslationError(
@@ -1491,11 +1496,12 @@ def translate_and_render(
                             _api_translations, _api_ocr_texts = _run_llm_translation()
                         except Exception as _api_err:
                             log_message(
-                                f"[Manual TXT] Google API failed ({_api_err}), creating empty template...",
+                                f"[Manual TXT] Google API failed ({_api_err}), creating template with OCR texts...",
                                 always_print=True,
                             )
                             _api_translations = ["" for _ in sorted_bubble_data]
-                            _api_ocr_texts = ["" for _ in sorted_bubble_data]
+                            # Reuse OCR texts already collected before translation failed (e.g. PROHIBITED_CONTENT)
+                            _api_ocr_texts = list(_shared_ocr_texts) if _shared_ocr_texts else ["" for _ in sorted_bubble_data]
 
                         # Pad lists if needed
                         _n = len(sorted_bubble_data)
@@ -1786,7 +1792,6 @@ def translate_and_render(
                                     "Restoring original OSB patch because OCR matches translation "
                                     f"for {bbox}",
                                     verbose=verbose,
-                                    always_print=True,
                                 )
                                 rendered_image = pil_cleaned_image.copy()
                                 original_patch = bubble["original_crop_pil"]

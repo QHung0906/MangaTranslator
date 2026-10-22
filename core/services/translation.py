@@ -2259,14 +2259,21 @@ The target language is {output_language}. Use the appropriate translation approa
                     previous_context_image_count=previous_context_image_count,
                     previous_context_text_count=previous_context_text_count,
                 )
-            translation_response_text = _call_llm_endpoint(
-                config,
-                translation_parts,
-                translation_prompt,
-                debug,
-                system_prompt=translation_system,
-                prompt_cache_key=session_prompt_cache_key,
-            )
+            try:
+                translation_response_text = _call_llm_endpoint(
+                    config,
+                    translation_parts,
+                    translation_prompt,
+                    debug,
+                    system_prompt=translation_system,
+                    prompt_cache_key=session_prompt_cache_key,
+                )
+            except Exception as _trans_err:
+                # OCR already succeeded — propagate those texts before re-raising
+                # so callers (e.g. Manual TXT template builder) still have the originals.
+                if ocr_texts_output is not None:
+                    ocr_texts_output.extend(extracted_texts)
+                raise
             if use_rosetta or use_hy_mt2:
                 final_translations = _parse_rosetta_response(
                     translation_response_text,
