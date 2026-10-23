@@ -27,7 +27,9 @@ MAX_BLUR_RADIUS = 10  # Maximum blur radius in pixels
 
 # Inpainting Parameters
 FLUX_GUIDANCE_SCALE = 2.5  # Flux Kontext guidance scale
-CONTEXT_PADDING_RATIO = 0.5  # Context padding is 50% of detection size
+CONTEXT_PADDING_RATIO = (
+    0.5  # Context padding is 50% of detection size
+)
 MAX_CONTEXT_PADDING = 80  # Context padding capped at 80 pixels
 
 
@@ -1339,10 +1341,10 @@ class FluxKleinInpainter:
         if current_pixels <= 0:
             scale = 1.0
             reason = "model-compatible dimensions"
-        elif self.upscale_small_crops:
+        elif self.upscale_small_crops and current_pixels < 1_048_576:
             target_pixels = 1_048_576  # 2^20 = 1024x1024
             scale = math.sqrt(target_pixels / current_pixels)
-            reason = "~1MP, multiples of 16"
+            reason = "upscale small crop to ~1MP, multiples of 16"
         elif current_pixels > self.MAX_INFERENCE_PIXELS:
             scale = math.sqrt(self.MAX_INFERENCE_PIXELS / current_pixels)
             reason = "4MP cap, multiples of 16"
@@ -1455,11 +1457,9 @@ class FluxKleinInpainter:
         bbox_width = x_max - x_min
         bbox_height = y_max - y_min
 
-        # Calculate context padding (doubled for Klein vs Kontext)
+        # Calculate context padding (+200px cap instead of 80px)
         padding_pixels = int(max(bbox_width, bbox_height) * CONTEXT_PADDING_RATIO)
-        padding = int(
-            min(padding_pixels, MAX_CONTEXT_PADDING) * self.KLEIN_PADDING_MULTIPLIER
-        )
+        padding = int(min(padding_pixels, MAX_CONTEXT_PADDING))
 
         blur_radius = int(max(bbox_width, bbox_height) * BLUR_SCALE_FACTOR)
         blur_radius = max(MIN_BLUR_RADIUS, min(blur_radius, MAX_BLUR_RADIUS))
@@ -1609,6 +1609,8 @@ class FluxKleinInpainter:
                 if self.cf_client is None:
                     raise ModelError("Cloudflare client is not initialized.")
                 mask_pil = Image.fromarray((mask_crop_np.astype(np.uint8) * 255))
+                if mask_pil.size != inference_image.size:
+                    mask_pil = mask_pil.resize(inference_image.size, Image.Resampling.NEAREST)
                 model_key = (
                     f"flux_klein_{self.variant}"
                     if self.variant in ("4b", "9b")
@@ -1628,6 +1630,8 @@ class FluxKleinInpainter:
                 if self.colab_client is None:
                     raise ModelError("Colab client is not initialized.")
                 mask_pil = Image.fromarray((mask_crop_np.astype(np.uint8) * 255))
+                if mask_pil.size != inference_image.size:
+                    mask_pil = mask_pil.resize(inference_image.size, Image.Resampling.NEAREST)
                 model_key = (
                     f"flux_klein_{self.variant}"
                     if self.variant in ("4b", "9b")

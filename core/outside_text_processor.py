@@ -1952,6 +1952,14 @@ def finish_outside_text_work(
                     )
 
                     cluster_concurrency = 1
+                    if inpainter is not None:
+                        if getattr(inpainter, "backend", None) == "remote_colab" and getattr(inpainter, "colab_client", None):
+                            inpainter.colab_client.ensure_checked()
+                            from core.image.colab_client import _SESSION_DEAD_SERVERS
+                            alive_urls = [u for u in inpainter.colab_client.server_urls if u not in _SESSION_DEAD_SERVERS]
+                            cluster_concurrency = max(1, len(alive_urls))
+                        elif getattr(inpainter, "backend", None) == "cloudflare" and getattr(inpainter, "cf_client", None):
+                            cluster_concurrency = max(1, len(getattr(inpainter.cf_client, "accounts", [])))
 
                     for batch_start in range(0, len(clusters), cluster_concurrency):
                         batch = list(enumerate(clusters))[batch_start : batch_start + cluster_concurrency]
