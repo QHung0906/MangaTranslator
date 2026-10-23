@@ -475,3 +475,23 @@ def extract_ocr_blocks_for_files(
 
     return "\n\n".join(blocks)
 
+
+def sanitize_chunk_size(
+    raw_chunk_size: Any,
+    default: int = 10,
+    min_val: int = 1,
+    max_val: int = 50,
+) -> int:
+    try:
+        val = int(raw_chunk_size)
+        return max(min_val, min(max_val, val))
+    except (ValueError, TypeError):
+        return default
+
+
+def chunk_files_list(files: List[str], chunk_size: int) -> List[List[str]]:
+    if not files:
+        return []
+    c_size = max(1, int(chunk_size))
+    return [files[i : i + c_size] for i in range(0, len(files), c_size)]
+

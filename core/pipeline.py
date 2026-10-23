@@ -691,6 +691,18 @@ def translate_and_render(
     hf_token = config.outside_text.huggingface_token
     get_model_manager().set_hf_token(hf_token)
 
+    # Trigger non-blocking background check for remote Colab inpainting servers during Detect/OCR
+    if (
+        config.outside_text.enabled
+        and getattr(config.outside_text, "flux_backend", None) == "remote_colab"
+        and getattr(config.outside_text, "colab_server_url", None)
+    ):
+        try:
+            from core.image.colab_client import ColabClientManager
+            ColabClientManager.trigger_background_preflight(config.outside_text.colab_server_url)
+        except Exception:
+            pass
+
     try:
         pil_original = Image.open(image_path)
         image_format = pil_original.format
@@ -2949,6 +2961,18 @@ def batch_translate_images(
         output_dir = Path("./output") / timestamp
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # Trigger non-blocking background check for remote Colab inpainting servers during initial batch steps
+    if (
+        config.outside_text.enabled
+        and getattr(config.outside_text, "flux_backend", None) == "remote_colab"
+        and getattr(config.outside_text, "colab_server_url", None)
+    ):
+        try:
+            from core.image.colab_client import ColabClientManager
+            ColabClientManager.trigger_background_preflight(config.outside_text.colab_server_url)
+        except Exception:
+            pass
 
     image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
 

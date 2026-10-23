@@ -983,9 +983,27 @@ def _get_api_key_candidates(config: TranslationConfig, provider: str) -> List[st
     elif provider == "OpenAI-Compatible":
         return [config.openai_compatible_api_key] if config.openai_compatible_api_key else [""]
     elif provider == "OmniRoute":
-        return [config.omniroute_api_key] if config.omniroute_api_key else [""]
+        if config.omniroute_api_key:
+            return [config.omniroute_api_key]
+        try:
+            from core.services.credentials import get_secure_api_keys
+            k = get_secure_api_keys("OmniRoute")
+            if k:
+                return k
+        except Exception:
+            pass
+        return [""]
     elif provider == "9router":
-        return [config.ninerouter_api_key] if config.ninerouter_api_key else [""]
+        if config.ninerouter_api_key:
+            return [config.ninerouter_api_key]
+        try:
+            from core.services.credentials import get_secure_api_keys
+            k = get_secure_api_keys("9router")
+            if k:
+                return k
+        except Exception:
+            pass
+        return [""]
     return []
 
 
