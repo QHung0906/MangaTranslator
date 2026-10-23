@@ -7,8 +7,10 @@
 >
 > **Major Enhancements & Custom Features developed by [@QHung0906](https://github.com/QHung0906)**:
 > 
-> 1.  **Remote Colab T4 GPU Inpainting Server (High-Performance Single Worker)**:
->    - Offload heavy inpainting computation to a free Google Colab Tesla T4 GPU instance via zero-config Cloudflare Tunnel (`pycloudflared`).
+> 1.  **Remote Colab T4 GPU Inpainting Server (Multi-Colab Cluster & Tailscale P2P)**:
+>    - Offload heavy inpainting computation to free Google Colab Tesla T4 GPU instances via zero-config Cloudflare Tunnel or direct WireGuard P2P.
+>    - **Multi-Colab Cluster & Failover Load Balancing**: Connect 2 or more Colab instances in parallel (comma or newline-separated URLs in Web UI) for 2x–3x inpainting throughput. Includes automatic dead-server detection (`_SESSION_DEAD_SERVERS`), instant failover, and round-robin request dispatch.
+>    - **Tailscale P2P VPN with Permanent Static IP**: Direct peer-to-peer WireGuard networking (`http://100.x.y.z:8000`) for minimal latency and unlimited bandwidth. Node state is persisted to Google Drive (`MyDrive/.tailscale/{hostname}.state`), guaranteeing a fixed IP address across Colab restarts.
 >    - **Optimized Single Worker Architecture**: Dedicated pipeline leveraging full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4) with direct VAE decoding (tiling/slicing disabled) and auto CUDA warmup.
 >    - **Startup Model Preloading**: Pre-allocates model pipelines and precomputed embeddings immediately on server boot, eliminating initial cold-start delays and client timeouts.
 >    - Keeps local computers cool, saves storage, and prevents local VRAM/system RAM exhaustion.
@@ -318,12 +320,14 @@ python main.py --help
 Offload speech bubble & outside-text inpainting to a free **Google Colab Tesla T4 GPU** or Kaggle environment without requiring a dedicated local GPU.
 
 ### ✨ Highlights
+- **Multi-Colab Cluster & Failover Load Balancing**: Connect 2 or more Colab instances in parallel (comma or newline-separated URLs in Web UI) for 2x–3x inpainting throughput. Features automatic dead-server detection (`_SESSION_DEAD_SERVERS`), instant failover, and round-robin request dispatch.
+- **Tailscale P2P VPN with Permanent Static IP**: Direct WireGuard peer-to-peer networking (`http://100.x.y.z:8000`) for zero-latency communication and unlimited bandwidth. Node state is persisted to Google Drive (`MyDrive/.tailscale/{hostname}.state`), guaranteeing a fixed IP address across Colab restarts.
 - **High-Performance Single Worker**: Dedicated pipeline running at full GPU memory bus bandwidth (~18–20s per inpaint pass on Tesla T4).
 - **Startup Model Preloading**: Pre-allocates and warms up the selected model pipeline and cached embeddings immediately upon boot, avoiding initial client-side request timeouts.
 - **Direct VAE Decoding**: VAE tiling and slicing disabled to decode 1024x1024 in a single fused pass, cutting ~3–5s per image.
 - **Zero Text-Encoder Architecture**: Bypasses the ~2.8 GB text encoder entirely via precomputed prompt embeddings (`.pt`), slashing load time to ~2 seconds and saving disk space.
 - **Auto Warmup**: Primes CUDA kernels and allocators at server startup so the very first inpaint runs at peak speed.
-- **Zero-Config Cloudflare Tunnel**: Generates a secure public URL (`https://xxxx.trycloudflare.com`) with no port forwarding required.
+- **Zero-Config Cloudflare Tunnel**: Alternative tunnel mode generating a quick public URL (`https://xxxx.trycloudflare.com`) without port forwarding.
 
 ### 📥 Precomputed Embeddings Download
 Download the precomputed `.pt` embeddings directly into Google Drive (`MyDrive/`) or upload to Colab:
@@ -334,13 +338,16 @@ Download the precomputed `.pt` embeddings directly into Google Drive (`MyDrive/`
 
 ### 🚀 Usage Instructions
 1. Open [`colab_inpainting_server.ipynb`](colab_inpainting_server.ipynb) on Google Colab and select **Runtime -> Change runtime type -> T4 GPU**.
-2. Run the notebook (or paste the contents of [`colab_server.py`](colab_server.py) into a cell).
-3. Copy the generated Cloudflare URL (e.g. `https://xxxx.trycloudflare.com`).
+2. Configure your connection mode in the notebook:
+   - **Tailscale P2P (Recommended)**: Set `USE_TAILSCALE = True`, paste your `TAILSCALE_AUTHKEY`, and mount Google Drive (`SAVE_STATE_TO_DRIVE = True`). Your Colab node will permanently retain its fixed Tailscale IP (e.g. `http://100.x.y.z:8000`).
+   - **Cloudflare Tunnel**: Set `USE_CLOUDFLARE = True` to get a quick public URL (`https://xxxx.trycloudflare.com`).
+3. Run the notebook.
 4. In your local MangaTranslator Web UI:
    - Go to **Settings -> Outside Text Inpainting**
    - Inpainting Method: `Flux.2 Klein 4B`
    - Backend: `Remote Colab`
-   - Colab Server URL: Paste your Cloudflare URL
+   - **Colab Server URL**: Paste your server URL.
+     > 💡 *Multi-Server Cluster Tip*: You can paste multiple URLs separated by commas or newlines (e.g., `http://100.64.1.2:8000, http://100.64.1.3:8000` or mix Cloudflare & Tailscale). The client automatically distributes concurrent image crops across all active servers and fails over seamlessly if one disconnects.
    - Click **Test Connection** to verify.
 
 ## Documentation
